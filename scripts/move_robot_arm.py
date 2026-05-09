@@ -430,6 +430,46 @@ class MoveUR5Node(object):
 
         return acceptable
 
+    def is_lift_pose_acceptable(self, lift_pose):
+        # -------------------------------------------------------------------------
+        # BLOCK: Verified lift acceptance.
+        # Gazebo/MoveIt may report CONTROL_FAILED even when the object has been
+        # physically lifted. This function checks the real current end-effector
+        # pose and accepts the lift if the gripper is high enough.
+        # -------------------------------------------------------------------------
+
+        current_pose = self.move_arm.get_current_pose().pose
+        current_position = current_pose.position
+        target_position = lift_pose.position
+
+        z_error = abs(current_position.z - target_position.z)
+        xy_error = (
+            (current_position.x - target_position.x) ** 2 +
+            (current_position.y - target_position.y) ** 2
+        ) ** 0.5
+
+        # Conservative acceptance thresholds.
+        min_acceptable_lift_z = 0.45
+        max_xy_error = 0.08
+        max_z_error = 0.15
+
+        acceptable = (
+            current_position.z >= min_acceptable_lift_z and
+            xy_error <= max_xy_error and
+            z_error <= max_z_error
+        )
+
+        rospy.logwarn(
+            "Verified lift check: current_z=%.3f m, target_z=%.3f m, xy_error=%.3f m, z_error=%.3f m, acceptable=%s",
+            current_position.z,
+            target_position.z,
+            xy_error,
+            z_error,
+            acceptable
+        )
+
+        return acceptable
+
     def go_to_joint_arm_state(self, joint_goal):
         ## Movement to a joint position of the arm.
         ## The order of the joints is the following: shoulder_pan_joint, shoulder_lift_join,
@@ -837,10 +877,17 @@ class MoveUR5Node(object):
                 LIFT_HEIGHT
             )
 
-            if self.go_to_pose_with_retries(lift_pose, "lift grasped object"):
+            lift_success = self.go_to_pose_with_retries(lift_pose, "lift grasped object")
+
+            if lift_success or self.is_lift_pose_acceptable(lift_pose):
+                if not lift_success:
+                    rospy.logwarn(
+                        "MoveIt reported lift failure, but the measured end-effector height is acceptable. Marking Part 1 as completed."
+                    )
+
                 self.task_state = "FINISHED"
             else:
-                rospy.logwarn("Could not lift the object. Keeping current state for safety.")
+                rospy.logwarn("Could not verify that the object was lifted. Keeping current state for safety.")
 
             return
 
