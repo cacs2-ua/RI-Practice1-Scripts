@@ -383,6 +383,53 @@ class MoveUR5Node(object):
 
         rospy.logwarn("================================================")
 
+    def is_grasp_pose_acceptable(self, grasp_pose):
+        # -------------------------------------------------------------------------
+        # BLOCK: Verified grasp-pose acceptance.
+        # MoveIt/Gazebo can report CONTROL_FAILED even when the end-effector has
+        # physically reached a valid grasping pose. This function checks the real
+        # current pose before allowing the gripper to close.
+        # -------------------------------------------------------------------------
+
+        current_pose = self.move_arm.get_current_pose().pose
+        current_position = current_pose.position
+
+        object_position = self.object_position
+        target_position = grasp_pose.position
+
+        # Distance to the commanded grasp target.
+        target_error_x = current_position.x - target_position.x
+        target_error_y = current_position.y - target_position.y
+        target_error_z = current_position.z - target_position.z
+        target_error_xy = (target_error_x ** 2 + target_error_y ** 2) ** 0.5
+        target_error_3d = (target_error_x ** 2 + target_error_y ** 2 + target_error_z ** 2) ** 0.5
+
+        # XY distance to the detected red object.
+        object_error_x = current_position.x - object_position.x
+        object_error_y = current_position.y - object_position.y
+        object_error_xy = (object_error_x ** 2 + object_error_y ** 2) ** 0.5
+
+        # Tolerances in metres.
+        max_target_3d_error = 0.025
+        max_object_xy_error = 0.025
+        max_z_error = 0.030
+
+        acceptable = (
+            target_error_3d <= max_target_3d_error and
+            object_error_xy <= max_object_xy_error and
+            abs(target_error_z) <= max_z_error
+        )
+
+        rospy.logwarn(
+            "Verified grasp check: target_3d_error=%.3f m, object_xy_error=%.3f m, z_error=%.3f m, acceptable=%s",
+            target_error_3d,
+            object_error_xy,
+            abs(target_error_z),
+            acceptable
+        )
+
+        return acceptable
+
     def go_to_joint_arm_state(self, joint_goal):
         ## Movement to a joint position of the arm.
         ## The order of the joints is the following: shoulder_pan_joint, shoulder_lift_join,
@@ -744,14 +791,20 @@ class MoveUR5Node(object):
             descent_success = self.go_to_pose_with_retries(grasp_pose, "descend to grasp height")
 
             # Print diagnostic information even if MoveIt reports CONTROL_FAILED.
-            # This does not close the gripper automatically. It only helps to
-            # calibrate the x/y grasp offsets more precisely.
             self.print_grasp_alignment_error(grasp_pose)
 
-            if descent_success:
+            # Do not close blindly. Close only if MoveIt succeeded OR if the real
+            # end-effector pose is verified to be close enough to the grasp target.
+            descent_acceptable = self.is_grasp_pose_acceptable(grasp_pose)
+
+            if descent_success or descent_acceptable:
+                if not descent_success:
+                    rospy.logwarn(
+                        "MoveIt reported failure, but the measured end-effector pose is acceptable. Proceeding to close gripper."
+                    )
                 self.task_state = "CLOSE_GRIPPER"
             else:
-                rospy.logwarn("Could not reach grasp pose. Returning to APPROACH_OBJECT.")
+                rospy.logwarn("Could not reach a verified grasp pose. Returning to APPROACH_OBJECT.")
                 self.task_state = "APPROACH_OBJECT"
 
             return
