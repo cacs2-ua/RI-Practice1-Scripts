@@ -72,7 +72,13 @@ CLOSE_JOINT_STATE = [
 
 APPROACH_HEIGHT = 0.45
 GRASP_HEIGHT = 0.36
-LIFT_HEIGHT = 0.65
+LIFT_HEIGHT = 0.52
+
+# Partial gripper closing ratio.
+# 0.0 = fully open named target.
+# 1.0 = fully closed named target.
+# A value around 0.45-0.60 is safer for the red prism than forcing "closed".
+PARTIAL_GRIPPER_CLOSE_RATIO = 0.55
 
 # Offset between the detected object center and the end-effector target.
 # This is needed because the MoveIt end-effector frame is not necessarily
@@ -84,6 +90,15 @@ OBJECT_SCENE_HEIGHT = 0.10
 OBJECT_BOX_SIZE = (0.10, 0.10, 0.20)
 
 MAX_GRASP_PLANNING_ATTEMPTS = 3
+
+
+
+USE_HOME_BEFORE_GRASP = False
+USE_CARTESIAN_PATH_FOR_GRASP = True
+
+CARTESIAN_EEF_STEP = 0.01
+MIN_CARTESIAN_PATH_FRACTION = 0.80
+
 
 
 class MoveUR5Node(object):
@@ -108,6 +123,21 @@ class MoveUR5Node(object):
         self.grasp_target_x_offset = rospy.get_param("~grasp_target_x_offset", GRASP_TARGET_X_OFFSET)
         self.grasp_target_y_offset = rospy.get_param("~grasp_target_y_offset", GRASP_TARGET_Y_OFFSET)
 
+        self.partial_gripper_close_ratio = rospy.get_param(
+            "~partial_gripper_close_ratio",
+            PARTIAL_GRIPPER_CLOSE_RATIO
+        )
+        
+        # -------------------------------------------------------------------------
+        # BLOCK: Runtime movement strategy parameters.
+        # These parameters allow switching between direct Cartesian movement and
+        # standard MoveIt pose planning without editing the file again.
+        # -------------------------------------------------------------------------
+
+        self.use_home_before_grasp = rospy.get_param("~use_home_before_grasp", USE_HOME_BEFORE_GRASP)
+        self.use_cartesian_path_for_grasp = rospy.get_param("~use_cartesian_path_for_grasp", USE_CARTESIAN_PATH_FOR_GRASP)
+
+
         rospy.loginfo(
             "Using UR5 global position x=%.3f, y=%.3f, z=%.3f",
             ROBOT_POSITION.x,
@@ -119,6 +149,17 @@ class MoveUR5Node(object):
             "Using grasp target offset x=%.3f, y=%.3f",
             self.grasp_target_x_offset,
             self.grasp_target_y_offset
+        )
+
+        rospy.loginfo(
+            "Using partial gripper close ratio=%.3f",
+            self.partial_gripper_close_ratio
+        )
+
+        rospy.loginfo(
+            "Using home-before-grasp=%s, cartesian-path-for-grasp=%s",
+            str(self.use_home_before_grasp),
+            str(self.use_cartesian_path_for_grasp)
         )
 
         ## Initialize "RobotCommander". It gives information about the robot, such as its cinematic and the joint state.
@@ -177,7 +218,12 @@ class MoveUR5Node(object):
         rospy.loginfo("Runtime close gripper state: {}".format(self.runtime_close_gripper_state))
 
         self.go_to_named_gripper_state(["open", "Open", "opened", "Opened"], "open gripper")
-        self.go_to_joint_arm_state(HOME_JOINT_STATE)
+
+        if self.use_home_before_grasp:
+            rospy.loginfo("Moving arm to HOME before grasp.")
+            self.go_to_joint_arm_state(HOME_JOINT_STATE)
+        else:
+            rospy.loginfo("Skipping HOME movement because the object is already close to the gripper.")
 
         # Save the current end-effector orientation after reaching HOME.
         # This orientation is reused during approach, descent, and lifting.
@@ -422,6 +468,40 @@ class MoveUR5Node(object):
         rospy.logwarn("No named target found for {}. Candidates: {}".format(description, candidate_target_names))
         return False
 
+
+    def go_to_partial_gripper_close_state(self):
+        # -------------------------------------------------------------------------
+        # BLOCK: Partial gripper closing.
+        # The named target "closed" may close too aggressively and destabilize the
+        # red object. This function interpolates between the named "open" and
+        # "closed" targets to obtain a softer grasp.
+        # -------------------------------------------------------------------------
+
+        available_named_targets = self.move_gripper.get_named_targets()
+
+        if "open" not in available_named_targets or "closed" not in available_named_targets:
+            rospy.logwarn("Named gripper targets 'open' and 'closed' are not both available.")
+            return self.go_to_safe_gripper_state(self.runtime_close_gripper_state, "partial close gripper fallback")
+
+        active_joint_names = self.move_gripper.get_active_joints()
+
+        open_target_dict = self.move_gripper.get_named_target_values("open")
+        closed_target_dict = self.move_gripper.get_named_target_values("closed")
+
+        partial_close_joint_goal = []
+
+        for joint_name in active_joint_names:
+            open_value = open_target_dict[joint_name]
+            closed_value = closed_target_dict[joint_name]
+
+            partial_value = open_value + self.partial_gripper_close_ratio * (closed_value - open_value)
+            partial_close_joint_goal.append(partial_value)
+
+        rospy.loginfo("Partial gripper close target:")
+        rospy.loginfo(partial_close_joint_goal)
+
+        return self.go_to_safe_gripper_state(partial_close_joint_goal, "partial close gripper")
+
     def go_to_safe_gripper_state(self, joint_goal, description):
         # -------------------------------------------------------------------------
         # BLOCK: Safe gripper movement wrapper.
@@ -445,6 +525,7 @@ class MoveUR5Node(object):
 
         # We set the target pose and we use the command go() to plan and execute
         # the movement. The function returns if it has perform it.
+        self.move_arm.set_start_state_to_current_state()
         self.move_arm.set_pose_target(pose_goal)
         success = self.move_arm.go(wait=True)
 
@@ -457,6 +538,51 @@ class MoveUR5Node(object):
         # Check if the robot has reached the target.
         current_pose = self.move_arm.get_current_pose().pose
         return success and all_close(pose_goal, current_pose, 0.1)
+
+    def go_to_pose_cartesian_path(self, pose_goal, description):
+        # -------------------------------------------------------------------------
+        # BLOCK: Direct Cartesian path execution.
+        # This moves the end-effector through a straight Cartesian interpolation
+        # from the current pose to the target pose. It avoids unnecessary large
+        # rotations caused by unconstrained IK pose planning.
+        # -------------------------------------------------------------------------
+
+        rospy.loginfo("Computing Cartesian path for: %s", description)
+
+        self.move_arm.set_start_state_to_current_state()
+
+        waypoints = []
+        waypoints.append(copy.deepcopy(pose_goal))
+
+        plan, fraction = self.move_arm.compute_cartesian_path(
+            waypoints,
+            CARTESIAN_EEF_STEP,
+            0.0
+        )
+
+        rospy.loginfo(
+            "Cartesian path fraction for %s: %.3f",
+            description,
+            fraction
+        )
+
+        if fraction < MIN_CARTESIAN_PATH_FRACTION:
+            rospy.logwarn(
+                "Cartesian path rejected for %s because fraction %.3f is below %.3f",
+                description,
+                fraction,
+                MIN_CARTESIAN_PATH_FRACTION
+            )
+            return False
+
+        success = self.move_arm.execute(plan, wait=True)
+
+        self.move_arm.stop()
+        self.move_arm.clear_pose_targets()
+
+        current_pose = self.move_arm.get_current_pose().pose
+
+        return success and all_close(pose_goal, current_pose, 0.08)
 
     def go_to_pose_with_retries(self, pose_goal, description):
         # -------------------------------------------------------------------------
@@ -473,7 +599,12 @@ class MoveUR5Node(object):
                 MAX_GRASP_PLANNING_ATTEMPTS
             )
 
-            if self.go_to_pose_arm_goal(pose_goal):
+            if self.use_cartesian_path_for_grasp:
+                motion_success = self.go_to_pose_cartesian_path(pose_goal, description)
+            else:
+                motion_success = self.go_to_pose_arm_goal(pose_goal)
+
+            if motion_success:
                 rospy.loginfo("Motion succeeded: %s", description)
                 return True
 
@@ -626,26 +757,21 @@ class MoveUR5Node(object):
             return
 
         if self.task_state == "CLOSE_GRIPPER":
-            # -------------------------------------------------------------------------
-            # BLOCK: Close the gripper after a successful descent.
-            # The numeric fallback is intentionally not used here because the gripper
-            # joint limits in MoveIt reject some manually computed values. In addition,
-            # when the fingers touch the object, the controller may report CONTROL_FAILED
-            # even though the grasp attempt is physically valid for this practice.
-            # -------------------------------------------------------------------------
+            close_success = self.go_to_partial_gripper_close_state()
 
-            self.go_to_named_gripper_state(["closed", "close", "Closed", "Close"], "close gripper")
+            if close_success:
+                self.task_state = "ATTACH_OBJECT"
+            else:
+                rospy.logwarn("Partial gripper close failed. Returning to APPROACH_OBJECT.")
+                self.task_state = "APPROACH_OBJECT"
 
-            rospy.sleep(1.0)
-
-            self.task_state = "ATTACH_OBJECT"
             return
 
         if self.task_state == "ATTACH_OBJECT":
-            # Add and attach the object only after closing the gripper.
-            # This avoids blocking the descent trajectory with a collision object.
-            self.add_object(self.object_position)
-            self.attach_object()
+            # Do not add/attach the object in the MoveIt planning scene here.
+            # The real object already exists in Gazebo. Adding it again as a MoveIt
+            # collision object after closing the gripper can create START_STATE_IN_COLLISION.
+            rospy.loginfo("Skipping MoveIt attach object to avoid START_STATE_IN_COLLISION.")
             self.task_state = "LIFT_OBJECT"
             return
 
