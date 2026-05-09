@@ -16,10 +16,16 @@ if __name__ == '__main__':
 
     with open(rospkg.RosPack().get_path("robotica_inteligente")+"/models/object/model.sdf", "r") as f:
         object_model = f.read()
+        
+    # -------------------------------------------------------------------------
+    # BLOCK: Red object spawn position near the UR5 gripper working area.
+    # The object is spawned around a point that is reachable by the UR5 and close
+    # to the grasping position previously validated from /pose_array.
+    # -------------------------------------------------------------------------
 
-    mu, sigma = np.array([5, 3.5]), 0.15
+    mu, sigma = np.array([0.56, -0.25]), 0.03
     point = np.random.normal(mu, sigma)
-    while np.linalg.norm(mu-point)>0.3:
+    while np.linalg.norm(mu - point) > 0.08:
         point = np.random.normal(mu, sigma)
 
     object_pose   =   Pose(Point(x=point[0], y=point[1],    z=0.1),   Quaternion(x=0.0, y=0.0, z=0.0, w=1.0))

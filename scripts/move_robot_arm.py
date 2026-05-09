@@ -32,7 +32,7 @@ from moveit_commander.conversions import pose_to_list
 # -------------------------------------------------------------------------
 
 #TODO Define the global position of the robot.
-ROBOT_POSITION = geometry_msgs.msg.Point(x=5.0, y=3.5, z=0.0)
+ROBOT_POSITION = geometry_msgs.msg.Point(x=0.0, y=0.0, z=0.0)
 
 #TODO Define joint positions of the arm (home position) and of the gripper (open and close)
 # They muss be in radians.
@@ -71,8 +71,14 @@ CLOSE_JOINT_STATE = [
 # -------------------------------------------------------------------------
 
 APPROACH_HEIGHT = 0.45
-GRASP_HEIGHT = 0.20
-LIFT_HEIGHT = 0.55
+GRASP_HEIGHT = 0.36
+LIFT_HEIGHT = 0.65
+
+# Offset between the detected object center and the end-effector target.
+# This is needed because the MoveIt end-effector frame is not necessarily
+# the exact center between the gripper fingers.
+GRASP_TARGET_X_OFFSET = 0.005
+GRASP_TARGET_Y_OFFSET = -0.003
 
 OBJECT_SCENE_HEIGHT = 0.10
 OBJECT_BOX_SIZE = (0.10, 0.10, 0.20)
@@ -99,11 +105,20 @@ class MoveUR5Node(object):
         ROBOT_POSITION.y = rospy.get_param("~robot_global_y", ROBOT_POSITION.y)
         ROBOT_POSITION.z = rospy.get_param("~robot_global_z", ROBOT_POSITION.z)
 
+        self.grasp_target_x_offset = rospy.get_param("~grasp_target_x_offset", GRASP_TARGET_X_OFFSET)
+        self.grasp_target_y_offset = rospy.get_param("~grasp_target_y_offset", GRASP_TARGET_Y_OFFSET)
+
         rospy.loginfo(
             "Using UR5 global position x=%.3f, y=%.3f, z=%.3f",
             ROBOT_POSITION.x,
             ROBOT_POSITION.y,
             ROBOT_POSITION.z
+        )
+        
+        rospy.loginfo(
+            "Using grasp target offset x=%.3f, y=%.3f",
+            self.grasp_target_x_offset,
+            self.grasp_target_y_offset
         )
 
         ## Initialize "RobotCommander". It gives information about the robot, such as its cinematic and the joint state.
@@ -118,8 +133,8 @@ class MoveUR5Node(object):
         ## "gripper": The joints of the gripper to open and close it.
         ## "gripper_mode": The gripper has differents modes, that allosw to move the fingers in other directions.
         ## This last group doesn't need to  be used in this assignment.
-        self.move_arm = moveit_commander.MoveGroupCommander("arm")
-        self.move_gripper = moveit_commander.MoveGroupCommander("gripper")
+        self.move_arm = moveit_commander.MoveGroupCommander("arm", wait_for_servers=30.0)
+        self.move_gripper = moveit_commander.MoveGroupCommander("gripper", wait_for_servers=30.0)
 
         # -------------------------------------------------------------------------
         # BLOCK 4: MoveIt planning configuration.
@@ -177,6 +192,11 @@ class MoveUR5Node(object):
             geometry_msgs.msg.PoseArray, self.detection_callback, queue_size=1)
 
     def detection_callback(self, pose_array):
+        # Freeze the target once the grasping sequence has started.
+        # This prevents the RGB-D callback from changing the target while the arm is moving.
+        if hasattr(self, "task_state") and self.task_state != "WAIT_FOR_OBJECT":
+            return
+
         # Check if the object has been detected. It is communicated through the position in z.
 
         # -------------------------------------------------------------------------
@@ -209,6 +229,113 @@ class MoveUR5Node(object):
         object_arm_position.z = OBJECT_SCENE_HEIGHT
 
         return object_arm_position
+
+    def get_grasp_target_position(self):
+        # -------------------------------------------------------------------------
+        # BLOCK: Grasp target correction.
+        # The RGB-D system detects the center of the red object, but the Cartesian
+        # target sent to MoveIt corresponds to the end-effector frame. Since the
+        # end-effector frame is not exactly the center between the fingers, a small
+        # x/y offset is applied to align the gripper around the object.
+        # -------------------------------------------------------------------------
+
+        grasp_target_position = geometry_msgs.msg.Point()
+        grasp_target_position.x = self.object_position.x + self.grasp_target_x_offset
+        grasp_target_position.y = self.object_position.y + self.grasp_target_y_offset
+        grasp_target_position.z = self.object_position.z
+
+        return grasp_target_position
+
+    def print_grasp_alignment_error(self, grasp_pose):
+        # -------------------------------------------------------------------------
+        # BLOCK: Grasp alignment diagnostic after descent.
+        # This function compares the current end-effector position with the detected
+        # red object position and the commanded grasp target. It is used to estimate
+        # how much x/y offset should be applied in the next execution.
+        # -------------------------------------------------------------------------
+
+        current_pose = self.move_arm.get_current_pose().pose
+        current_position = current_pose.position
+
+        object_position = self.object_position
+        target_position = grasp_pose.position
+
+        target_error_x = current_position.x - target_position.x
+        target_error_y = current_position.y - target_position.y
+        target_error_z = current_position.z - target_position.z
+        target_error_xy = (target_error_x ** 2 + target_error_y ** 2) ** 0.5
+        target_error_3d = (target_error_x ** 2 + target_error_y ** 2 + target_error_z ** 2) ** 0.5
+
+        object_error_x = current_position.x - object_position.x
+        object_error_y = current_position.y - object_position.y
+        object_error_z = current_position.z - object_position.z
+        object_error_xy = (object_error_x ** 2 + object_error_y ** 2) ** 0.5
+        object_error_3d = (object_error_x ** 2 + object_error_y ** 2 + object_error_z ** 2) ** 0.5
+
+        suggested_x_offset = self.grasp_target_x_offset - object_error_x
+        suggested_y_offset = self.grasp_target_y_offset - object_error_y
+
+        rospy.logwarn("========== GRASP ALIGNMENT DIAGNOSTIC ==========")
+        rospy.logwarn("Planning frame: %s", self.move_arm.get_planning_frame())
+
+        rospy.logwarn(
+            "Detected object position:     x=%.3f, y=%.3f, z=%.3f",
+            object_position.x,
+            object_position.y,
+            object_position.z
+        )
+
+        rospy.logwarn(
+            "Commanded grasp target:        x=%.3f, y=%.3f, z=%.3f",
+            target_position.x,
+            target_position.y,
+            target_position.z
+        )
+
+        rospy.logwarn(
+            "Current end-effector position: x=%.3f, y=%.3f, z=%.3f",
+            current_position.x,
+            current_position.y,
+            current_position.z
+        )
+
+        rospy.logwarn(
+            "Error to commanded target: dx=%.3f, dy=%.3f, dz=%.3f | xy=%.3f m | 3d=%.3f m",
+            target_error_x,
+            target_error_y,
+            target_error_z,
+            target_error_xy,
+            target_error_3d
+        )
+
+        rospy.logwarn(
+            "Error to detected object:  dx=%.3f, dy=%.3f, dz=%.3f | xy=%.3f m | 3d=%.3f m",
+            object_error_x,
+            object_error_y,
+            object_error_z,
+            object_error_xy,
+            object_error_3d
+        )
+
+        rospy.logwarn(
+            "Current offsets:   x=%.3f, y=%.3f",
+            self.grasp_target_x_offset,
+            self.grasp_target_y_offset
+        )
+
+        rospy.logwarn(
+            "Suggested offsets: x=%.3f, y=%.3f",
+            suggested_x_offset,
+            suggested_y_offset
+        )
+
+        rospy.logwarn(
+            "Suggested command: rosrun robotica_inteligente move_robot_arm.py _grasp_target_x_offset:=%.3f _grasp_target_y_offset:=%.3f",
+            suggested_x_offset,
+            suggested_y_offset
+        )
+
+        rospy.logwarn("================================================")
 
     def go_to_joint_arm_state(self, joint_goal):
         ## Movement to a joint position of the arm.
@@ -430,7 +557,10 @@ class MoveUR5Node(object):
             return
 
         if self.task_state == "ADD_OBJECT_TO_SCENE":
-            self.add_object(self.object_position)
+            # Do not add the red cube as a collision object before the descent.
+            # If the object is already in the MoveIt planning scene, the planner
+            # avoids it and may refuse to descend close enough for grasping.
+            rospy.loginfo("Skipping pre-grasp collision object insertion.")
             self.task_state = "OPEN_GRIPPER"
             return
 
@@ -441,9 +571,18 @@ class MoveUR5Node(object):
             return
 
         if self.task_state == "APPROACH_OBJECT":
+            grasp_target_position = self.get_grasp_target_position()
+
+            rospy.loginfo(
+                "Approach target after offset: x=%.3f, y=%.3f, z=%.3f",
+                grasp_target_position.x,
+                grasp_target_position.y,
+                APPROACH_HEIGHT
+            )
+
             approach_pose = self.build_grasp_pose(
-                self.object_position.x,
-                self.object_position.y,
+                grasp_target_position.x,
+                grasp_target_position.y,
                 APPROACH_HEIGHT
             )
 
@@ -456,13 +595,29 @@ class MoveUR5Node(object):
             return
 
         if self.task_state == "DESCEND_TO_OBJECT":
-            grasp_pose = self.build_grasp_pose(
-                self.object_position.x,
-                self.object_position.y,
+            grasp_target_position = self.get_grasp_target_position()
+
+            rospy.loginfo(
+                "Grasp target after offset: x=%.3f, y=%.3f, z=%.3f",
+                grasp_target_position.x,
+                grasp_target_position.y,
                 GRASP_HEIGHT
             )
 
-            if self.go_to_pose_with_retries(grasp_pose, "descend to grasp height"):
+            grasp_pose = self.build_grasp_pose(
+                grasp_target_position.x,
+                grasp_target_position.y,
+                GRASP_HEIGHT
+            )
+
+            descent_success = self.go_to_pose_with_retries(grasp_pose, "descend to grasp height")
+
+            # Print diagnostic information even if MoveIt reports CONTROL_FAILED.
+            # This does not close the gripper automatically. It only helps to
+            # calibrate the x/y grasp offsets more precisely.
+            self.print_grasp_alignment_error(grasp_pose)
+
+            if descent_success:
                 self.task_state = "CLOSE_GRIPPER"
             else:
                 rospy.logwarn("Could not reach grasp pose. Returning to APPROACH_OBJECT.")
@@ -471,20 +626,35 @@ class MoveUR5Node(object):
             return
 
         if self.task_state == "CLOSE_GRIPPER":
-            if not self.go_to_named_gripper_state(["close", "Close", "closed", "Closed"], "close gripper"):
-                self.go_to_safe_gripper_state(self.runtime_close_gripper_state, "close gripper")
+            # -------------------------------------------------------------------------
+            # BLOCK: Close the gripper after a successful descent.
+            # The numeric fallback is intentionally not used here because the gripper
+            # joint limits in MoveIt reject some manually computed values. In addition,
+            # when the fingers touch the object, the controller may report CONTROL_FAILED
+            # even though the grasp attempt is physically valid for this practice.
+            # -------------------------------------------------------------------------
+
+            self.go_to_named_gripper_state(["closed", "close", "Closed", "Close"], "close gripper")
+
+            rospy.sleep(1.0)
+
             self.task_state = "ATTACH_OBJECT"
             return
 
         if self.task_state == "ATTACH_OBJECT":
+            # Add and attach the object only after closing the gripper.
+            # This avoids blocking the descent trajectory with a collision object.
+            self.add_object(self.object_position)
             self.attach_object()
             self.task_state = "LIFT_OBJECT"
             return
 
         if self.task_state == "LIFT_OBJECT":
+            grasp_target_position = self.get_grasp_target_position()
+
             lift_pose = self.build_grasp_pose(
-                self.object_position.x,
-                self.object_position.y,
+                grasp_target_position.x,
+                grasp_target_position.y,
                 LIFT_HEIGHT
             )
 
