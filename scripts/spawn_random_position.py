@@ -23,10 +23,8 @@ if __name__ == '__main__':
     # to the grasping position previously validated from /pose_array.
     # -------------------------------------------------------------------------
 
-    mu, sigma = np.array([0.56, -0.25]), 0.03
-    point = np.random.normal(mu, sigma)
-    while np.linalg.norm(mu - point) > 0.08:
-        point = np.random.normal(mu, sigma)
+    mu = np.array([0.56, -0.25])
+    point = mu.copy()
 
     object_pose   =   Pose(Point(x=point[0], y=point[1],    z=0.1),   Quaternion(x=0.0, y=0.0, z=0.0, w=1.0))
     spawn_model("Object", object_model, "object", object_pose, "world")
