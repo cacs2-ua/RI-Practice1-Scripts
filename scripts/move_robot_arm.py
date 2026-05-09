@@ -556,8 +556,8 @@ class MoveUR5Node(object):
 
         plan, fraction = self.move_arm.compute_cartesian_path(
             waypoints,
-            CARTESIAN_EEF_STEP,
-            0.0
+            0.01,
+            True
         )
 
         rospy.loginfo(
