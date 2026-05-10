@@ -1,4 +1,6 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
+
+# Intelligent Robotics - Master's Degree in Artificial Intelligence - University of Alicante
 
 # This node (implemented in Python) detects obstacles in the scene using the point cloud from a LiDAR sensor.
 # The obstacles can be filtered using the height in Z axis given the XYZ coordinates of each point of the cloud.
@@ -25,18 +27,18 @@ pub_freezone  = None
 
 # -------------------------------------------------------------------------
 # BLOCK 1: Obstacle detection parameters.
-# The Velodyne frame is mounted above the floor, so floor points usually have
-# negative z values. Points with z greater than this threshold are considered
-# possible obstacles.
+# The Velodyne sensor is above the floor, therefore many floor points have
+# negative z values in the sensor frame. Points above this threshold are used
+# as obstacle candidates.
 # -------------------------------------------------------------------------
 
 altura = -0.45
 radio = 5.0
 
-# Minimum distance used to avoid detecting points that belong to the robot itself.
+# Minimum distance to ignore points belonging to the BLUE robot itself.
 min_obstacle_detection_distance = 0.35
 
-# Maximum distance used to ignore very distant points that are not useful for local planning.
+# Maximum distance to ignore points too far from the local navigation region.
 max_obstacle_detection_distance = 8.0
 
 
@@ -55,9 +57,9 @@ def filter_obstacles_function(point_cloud_in, altura):
     # An obstacle is considered based on the object height.
 
     # -------------------------------------------------------------------------
-    # BLOCK 2: Height-based obstacle filtering.
-    # Points higher than the selected threshold are projected to the same z level
-    # so that the planner can work in a 2D local navigation plane.
+    # BLOCK 2: Height-based obstacle extraction.
+    # Every point higher than "altura" and within the local useful radius is
+    # projected to z = altura. This gives a 2D obstacle cloud for the planner.
     # -------------------------------------------------------------------------
 
     for point in pc_data:
@@ -95,9 +97,8 @@ def free_zone_function(point_cloud_in, radio, altura):
 
     # -------------------------------------------------------------------------
     # BLOCK 3: Free-zone ring generation.
-    # For each valid LiDAR direction, a point is projected onto a circular ring.
-    # This ring is later used by the Naive-Valley-Path planner to choose local
-    # target candidates around the robot.
+    # For each valid LiDAR direction, a point is projected onto a ring of radius
+    # "radio". These ring points are candidate local goals for the planner.
     # -------------------------------------------------------------------------
 
     for point in pc_data:
@@ -172,7 +173,7 @@ def main():
 
     # -------------------------------------------------------------------------
     # BLOCK 4: Runtime ROS parameters.
-    # These parameters allow you to tune the detector without editing the file.
+    # These parameters allow tuning the detector without editing the source code.
     # -------------------------------------------------------------------------
 
     altura = rospy.get_param("~obstacle_height_threshold", altura)
