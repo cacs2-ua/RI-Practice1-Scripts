@@ -32,14 +32,12 @@ pub_freezone  = None
 # as obstacle candidates.
 # -------------------------------------------------------------------------
 
-altura = -0.45
-radio = 5.0
+altura = -0.40
+radio = 2.6
 
-# Minimum distance to ignore points belonging to the BLUE robot itself.
-min_obstacle_detection_distance = 0.35
 
-# Maximum distance to ignore points too far from the local navigation region.
-max_obstacle_detection_distance = 8.0
+min_obstacle_detection_distance = 0.55
+max_obstacle_detection_distance = 4.5
 
 
 def filter_obstacles_function(point_cloud_in, altura):

@@ -54,29 +54,32 @@ class BlueTrajectoryPlanner(object):
         # Collision and local-target tuning.
         # ---------------------------------------------------------------------
 
-        self.collision_margin = rospy.get_param("~collision_margin", 0.50)
+        self.collision_margin = rospy.get_param("~collision_margin", 0.56)
         self.robot_self_filter_radius = rospy.get_param("~robot_self_filter_radius", 0.35)
 
-        self.candidate_clearance = rospy.get_param("~candidate_clearance", 1.05)
-        self.blocked_sector_clearance = rospy.get_param("~blocked_sector_clearance", 1.20)
+        self.candidate_clearance = rospy.get_param("~candidate_clearance", 0.62)
+        self.blocked_sector_clearance = rospy.get_param("~blocked_sector_clearance", 0.55)
 
-        self.front_obstacle_sector_width = rospy.get_param("~front_obstacle_sector_width", 1.60)
-        self.front_obstacle_detection_distance = rospy.get_param("~front_obstacle_detection_distance", 4.50)
-        self.front_obstacle_slow_down_distance = rospy.get_param("~front_obstacle_slow_down_distance", 1.70)
+        self.front_obstacle_sector_width = rospy.get_param("~front_obstacle_sector_width", 0.95)
+        self.front_obstacle_detection_distance = rospy.get_param("~front_obstacle_detection_distance", 3.20)
+        self.front_obstacle_slow_down_distance = rospy.get_param("~front_obstacle_slow_down_distance", 1.60)
 
-        self.obstacle_approach_speed = rospy.get_param("~obstacle_approach_speed", 0.85)
-        self.creep_speed = rospy.get_param("~creep_speed", 0.55)
+        self.obstacle_approach_speed = rospy.get_param("~obstacle_approach_speed", 0.70)
+        self.creep_speed = rospy.get_param("~creep_speed", 0.45)
 
         self.minimum_turn_speed = rospy.get_param("~minimum_turn_speed", 0.65)
         self.turn_speed_reduction_weight = rospy.get_param("~turn_speed_reduction_weight", 0.35)
         self.min_turn_speed_factor = rospy.get_param("~min_turn_speed_factor", 0.65)
 
         self.emergency_stop_distance = rospy.get_param("~emergency_stop_distance", 0.85)
-
-        self.direct_goal_distance = rospy.get_param("~direct_goal_distance", 3.00)
-        self.direct_goal_clearance = rospy.get_param("~direct_goal_clearance", 0.75)
+        self.direct_goal_clearance = rospy.get_param("~direct_goal_clearance", 0.62)
+        self.direct_goal_distance = rospy.get_param("~direct_goal_distance", 100.0)
         self.goal_heading_weight_near_goal = rospy.get_param("~goal_heading_weight_near_goal", 2.2)
 
+
+
+        self.max_local_target_distance = rospy.get_param("~max_local_target_distance", 2.20)
+        self.local_planner_radius = rospy.get_param("~local_planner_radius", 2.60)
         # ---------------------------------------------------------------------
         # Trajectory score weights.
         # ---------------------------------------------------------------------
@@ -438,11 +441,10 @@ class BlueTrajectoryPlanner(object):
                         local_point.z = 0.0
                         final_orientation = 0.0
                     else:
-                        local_point.x = candidate_speed * cos(angular_velocity * sample) * sample
-                        local_point.y = candidate_speed * sin(angular_velocity * sample) * sample
+                        local_point.x = turn_radius * sin(angular_velocity * sample)
+                        local_point.y = turn_radius * (1.0 - cos(angular_velocity * sample))
                         local_point.z = 0.0
                         final_orientation = angular_velocity * sample
-
                     final_local_point = copy.deepcopy(local_point)
 
                     for obstacle in self.obstacles:
@@ -567,37 +569,45 @@ class BlueTrajectoryPlanner(object):
             return
 
         goal_in_local_axis = self.global2local(self.goal)
-        goal_distance = self.distance(self.position, self.goal)
 
         # ---------------------------------------------------------------------
-        # Direct final-goal mode.
-        # If the robot is close to the final target and the direct segment to the
-        # goal is not blocked, do not use the obstacle-avoidance ring anymore.
-        # This prevents endless circular motion around the goal.
+        # Modo normal: ir directamente al objetivo si el corredor está libre.
+        # Esto evita que el robot use el anillo de evitación cuando no hace falta.
         # ---------------------------------------------------------------------
+        if not self.is_direct_path_to_goal_blocked(goal_in_local_axis):
+            self.avoidance_side_sign = 0.0
 
-        if goal_distance < self.direct_goal_distance:
-            if not self.is_direct_path_to_goal_blocked(goal_in_local_axis):
-                self.avoidance_side_sign = 0.0
-                self.local_target = copy.deepcopy(goal_in_local_axis)
-                self.local_path = [copy.deepcopy(goal_in_local_axis)]
-                self.publish_local_path_markers()
+            goal_distance = sqrt(
+                goal_in_local_axis.x * goal_in_local_axis.x +
+                goal_in_local_axis.y * goal_in_local_axis.y
+            )
 
-                rospy.loginfo_throttle(
-                    1.0,
-                    "Direct goal approach mode active | goal_distance=%.3f | local_goal=(%.2f, %.2f)",
-                    goal_distance,
-                    goal_in_local_axis.x,
-                    goal_in_local_axis.y
-                )
+            self.local_target = geometry_msgs.msg.Point()
 
-                return
+            if goal_distance > self.max_local_target_distance:
+                scale = self.max_local_target_distance / goal_distance
+                self.local_target.x = goal_in_local_axis.x * scale
+                self.local_target.y = goal_in_local_axis.y * scale
+            else:
+                self.local_target.x = goal_in_local_axis.x
+                self.local_target.y = goal_in_local_axis.y
 
+            self.local_target.z = 0.0
+            self.local_path = [copy.deepcopy(self.local_target)]
+            self.publish_local_path_markers()
+            return
+
+        # ---------------------------------------------------------------------
+        # Modo obstáculo: solo aquí se usa la evitación local.
+        # ---------------------------------------------------------------------
         self.update_avoidance_side(goal_in_local_axis)
 
-        wa, wr, ar, aa = 100.0, 1.0, 0.8, 0.3
-        min_force = wr / pow(0.1, ar) - wa / pow(100.0, aa) + 1000.0
+        wa = 100.0
+        wr = 1.0
+        ar = 0.8
+        aa = 0.3
 
+        min_force = 100000.0
         local_goal = None
         self.local_path = []
 
@@ -605,15 +615,14 @@ class BlueTrajectoryPlanner(object):
             if self.is_candidate_blocked_by_obstacle(limit_point):
                 continue
 
+            # Evita cambiar de lado mientras se está bordeando el obstáculo.
+            # Pero no obliga a ir exageradamente lejos.
             if self.avoidance_side_sign != 0.0:
-                if limit_point.y * self.avoidance_side_sign < 0.20:
+                if limit_point.y * self.avoidance_side_sign < -0.05:
                     continue
 
             distance_a = self.distance(limit_point, goal_in_local_axis)
-
-            if distance_a < 0.1:
-                distance_a = 0.1
-
+            distance_a = max(distance_a, 0.10)
             force_a = wa / pow(distance_a, aa)
 
             min_distance = 10000.0
@@ -621,9 +630,7 @@ class BlueTrajectoryPlanner(object):
 
             for obstacle_point in self.obstacles:
                 distance_r = self.distance(limit_point, obstacle_point)
-
-                if distance_r < 0.1:
-                    distance_r = 0.1
+                distance_r = max(distance_r, 0.10)
 
                 if distance_r < min_distance:
                     min_distance = distance_r
@@ -631,8 +638,10 @@ class BlueTrajectoryPlanner(object):
 
             force = force_r - force_a
 
-            if self.avoidance_side_sign != 0.0:
-                force -= 0.15 * abs(limit_point.y)
+            # IMPORTANTE:
+            # Antes tenías un premio a |y|, que empujaba al coche hacia fuera.
+            # Ahora se penaliza ligeramente irse demasiado lateral.
+            force += 0.04 * abs(limit_point.y)
 
             if force < min_force:
                 min_force = force
@@ -641,7 +650,7 @@ class BlueTrajectoryPlanner(object):
         if local_goal is None:
             rospy.logwarn_throttle(
                 1.0,
-                "No valid local goal found in free-zone ring. Keeping previous local target."
+                "No valid local goal found. Keeping previous local target."
             )
             return
 
@@ -651,14 +660,18 @@ class BlueTrajectoryPlanner(object):
         wr2 = 1.0
         ar2 = 0.5
         aa2 = 0.3
-        radious = 4.0
+
+        radious = self.local_planner_radius
         delta_rad = radious / 3.0
 
-        selected_depth, selected_azimuth = self.cartesian2Spherical(local_goal.x, local_goal.y)
+        selected_depth, selected_azimuth = self.cartesian2Spherical(
+            local_goal.x,
+            local_goal.y
+        )
 
         for rad in np.arange(radious, delta_rad - 0.1, -delta_rad):
             ring_goal = None
-            ring_min_force = wr2 / pow(0.1, ar2) - wa2 / pow(100.0, aa2) + 1000.0
+            ring_min_force = 100000.0
 
             for limit_point in self.limits:
                 depth, azimuth = self.cartesian2Spherical(limit_point.x, limit_point.y)
@@ -668,14 +681,11 @@ class BlueTrajectoryPlanner(object):
                     continue
 
                 if self.avoidance_side_sign != 0.0:
-                    if p_in.y * self.avoidance_side_sign < 0.05:
+                    if p_in.y * self.avoidance_side_sign < -0.05:
                         continue
 
                 distance_a = self.distance(p_in, self.local_path[0])
-
-                if distance_a < 0.1:
-                    distance_a = 0.1
-
+                distance_a = max(distance_a, 0.10)
                 force_a = wa2 / pow(distance_a, aa2)
 
                 min_distance = 10000.0
@@ -683,9 +693,7 @@ class BlueTrajectoryPlanner(object):
 
                 for obstacle_point in self.obstacles:
                     distance_r = self.distance(p_in, obstacle_point)
-
-                    if distance_r < 0.1:
-                        distance_r = 0.1
+                    distance_r = max(distance_r, 0.10)
 
                     if distance_r < min_distance:
                         min_distance = distance_r
@@ -693,8 +701,8 @@ class BlueTrajectoryPlanner(object):
 
                 force = force_r - force_a
 
-                if self.avoidance_side_sign != 0.0:
-                    force -= 0.10 * abs(p_in.y)
+                # Penaliza rodeos demasiado abiertos.
+                force += 0.03 * abs(p_in.y)
 
                 if force < ring_min_force:
                     ring_min_force = force
@@ -705,16 +713,14 @@ class BlueTrajectoryPlanner(object):
 
             self.local_path.append(ring_goal)
 
-        # Use the nearest inner local point as the immediate tracking target.
-        # This makes the car start turning earlier instead of waiting until it is
-        # almost in front of the obstacle.
-        if len(self.local_path) >= 1:
-            self.local_target = self.local_path[-1]
+        # Usar el punto intermedio, no el más lejano ni el más cercano.
+        # Esto da un rodeo próximo, pero no brusco.
+        if len(self.local_path) >= 2:
+            self.local_target = self.local_path[-2]
         else:
-            self.local_target = self.global2local(self.goal)
+            self.local_target = self.local_path[0]
 
         self.publish_local_path_markers()
-
     # -------------------------------------------------------------------------
     # Obstacle-side and candidate validation.
     # -------------------------------------------------------------------------
@@ -765,12 +771,6 @@ class BlueTrajectoryPlanner(object):
                 self.avoidance_side_sign
             )
     def is_direct_path_to_goal_blocked(self, goal_in_local_axis):
-        # -------------------------------------------------------------------------
-        # Direct-path obstacle check.
-        # The final approach can be made directly only if no obstacle lies inside
-        # the corridor between the robot and the goal.
-        # -------------------------------------------------------------------------
-
         goal_distance = sqrt(
             goal_in_local_axis.x * goal_in_local_axis.x +
             goal_in_local_axis.y * goal_in_local_axis.y
@@ -782,25 +782,26 @@ class BlueTrajectoryPlanner(object):
         goal_unit_x = goal_in_local_axis.x / goal_distance
         goal_unit_y = goal_in_local_axis.y / goal_distance
 
+        # No hace falta mirar obstáculos lejanísimos.
+        checking_distance = min(goal_distance, self.front_obstacle_detection_distance)
+
         for obstacle in self.obstacles:
             obstacle_distance = sqrt(obstacle.x * obstacle.x + obstacle.y * obstacle.y)
 
             if obstacle_distance < self.robot_self_filter_radius:
                 continue
 
-            # Projection of the obstacle over the robot-goal segment.
             projection = obstacle.x * goal_unit_x + obstacle.y * goal_unit_y
 
-            # Ignore obstacles behind the robot or beyond the goal.
             if projection <= 0.0:
                 continue
 
-            if projection >= goal_distance:
+            if projection >= checking_distance:
                 continue
 
-            # Perpendicular distance from obstacle to the robot-goal line.
             perpendicular_x = obstacle.x - projection * goal_unit_x
             perpendicular_y = obstacle.y - projection * goal_unit_y
+
             perpendicular_distance = sqrt(
                 perpendicular_x * perpendicular_x +
                 perpendicular_y * perpendicular_y
