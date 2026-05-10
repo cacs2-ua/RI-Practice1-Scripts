@@ -11,6 +11,7 @@ if __name__ == '__main__':
     rospy.wait_for_service("/gazebo/spawn_sdf_model")
     rospy.wait_for_service("/gazebo/spawn_urdf_model")
 
+
     #Spawn object
     spawn_model = rospy.ServiceProxy("/gazebo/spawn_sdf_model", SpawnModel)
 
