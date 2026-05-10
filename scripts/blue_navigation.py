@@ -328,7 +328,16 @@ class BlueTrajectoryPlanner(object):
     # -------------------------------------------------------------------------
 
     def controlActionCalculation(self):
-        if self.position is None or self.goal_reached:
+        if self.position is None:
+            self.publish_stop_command()
+            rospy.logwarn_throttle(
+                2.0,
+                "BLUE navigation is waiting for localization. Check /blue/ground_truth or /pose_array."
+            )
+            return
+
+        if self.goal_reached:
+            self.publish_stop_command()
             return
 
         if not self.navigation_enabled:
@@ -487,6 +496,20 @@ class BlueTrajectoryPlanner(object):
 
         self.last_selected_steering = ackermann_control.steering_angle
         self.last_selected_speed = ackermann_control.speed
+
+        rospy.loginfo_throttle(
+            1.0,
+            "Planner command: best=%s | speed=%.3f | steer=%.3f | obstacles=%d | limits=%s | position=(%.2f, %.2f) | local_target=(%.2f, %.2f)",
+            str(best_command_found),
+            ackermann_control.speed,
+            ackermann_control.steering_angle,
+            len(self.obstacles),
+            "None" if self.limits is None else str(len(self.limits)),
+            self.position.x,
+            self.position.y,
+            self.local_target.x,
+            self.local_target.y
+        )
 
         self.ackermann_command_publisher.publish(ackermann_control)
 

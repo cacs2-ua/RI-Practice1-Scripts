@@ -12,6 +12,7 @@
 # -------------------------------------------------------------------------
 
 import rospy
+import time
 from math import pi, tan, atan
 from std_msgs.msg import Float64
 from ackermann_msgs.msg import AckermannDrive
@@ -42,7 +43,7 @@ class BlueLowLevelDriveBridge(object):
 
         self.current_speed = 0.0
         self.current_steering_angle = 0.0
-        self.last_command_time = rospy.Time.now()
+        self.last_command_wall_time = time.time()
 
         # -------------------------------------------------------------------------
         # BLOCK 3: Low-level steering publishers.
@@ -122,7 +123,7 @@ class BlueLowLevelDriveBridge(object):
             -MAX_STEERING_ANGLE,
             MAX_STEERING_ANGLE
         )
-        self.last_command_time = rospy.Time.now()
+        self.last_command_wall_time = time.time()
 
     def clamp(self, value, min_value, max_value):
         return max(min(value, max_value), min_value)
@@ -157,7 +158,7 @@ class BlueLowLevelDriveBridge(object):
         # If no Ackermann command is received recently, the robot is stopped.
         # -------------------------------------------------------------------------
 
-        elapsed_time = (rospy.Time.now() - self.last_command_time).to_sec()
+        elapsed_time = time.time() - self.last_command_wall_time
 
         if elapsed_time > COMMAND_TIMEOUT:
             speed = 0.0
@@ -175,6 +176,16 @@ class BlueLowLevelDriveBridge(object):
         if self.invert_wheel_speed:
             wheel_angular_speed = -wheel_angular_speed
 
+        rospy.loginfo_throttle(
+            1.0,
+            "Bridge command: speed=%.3f | steering=%.3f | wheel_speed=%.3f | left_steer=%.3f | right_steer=%.3f",
+            speed,
+            steering_angle,
+            wheel_angular_speed,
+            left_steering_angle,
+            right_steering_angle
+        )
+
         self.left_steering_publisher.publish(Float64(data=left_steering_angle))
         self.right_steering_publisher.publish(Float64(data=right_steering_angle))
 
@@ -186,13 +197,13 @@ class BlueLowLevelDriveBridge(object):
     def run(self):
         # -------------------------------------------------------------------------
         # BLOCK 9: Main bridge loop.
+        # Wall-clock sleep is used instead of rospy.Rate because Gazebo simulated
+        # time can be paused or reset during tests.
         # -------------------------------------------------------------------------
-
-        rate = rospy.Rate(20)
 
         while not rospy.is_shutdown():
             self.publish_low_level_commands()
-            rate.sleep()
+            time.sleep(1.0 / 20.0)
 
 
 def main():
