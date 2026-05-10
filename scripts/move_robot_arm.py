@@ -752,6 +752,87 @@ class MoveUR5Node(object):
     # TODO Define the functions to perform the task of grap the object and leave it in the mobile robot.
     # Consider the use of a state machine to coordinate the process.
 
+    def wait_for_planning_scene_update(self, box_is_known=False, box_is_attached=False, timeout=4.0):
+        start_time = rospy.get_time()
+
+        while (rospy.get_time() - start_time < timeout) and not rospy.is_shutdown():
+            attached_objects = self.scene.get_attached_objects([self.box_name])
+            is_attached = len(attached_objects.keys()) > 0
+
+            known_objects = self.scene.get_known_object_names()
+            is_known = self.box_name in known_objects
+
+            if is_attached == box_is_attached and is_known == box_is_known:
+                return True
+
+            rospy.sleep(0.1)
+
+        return False
+
+
+    def add_and_attach_object_to_moveit_scene(self):
+        # -------------------------------------------------------------------------
+        # Real MoveIt attach.
+        # This adds the red prism as a collision object and then attaches it to the
+        # end-effector, so RViz shows it as an attached object.
+        # -------------------------------------------------------------------------
+
+        self.box_name = "object"
+
+        end_effector_link = self.move_arm.get_end_effector_link()
+        planning_frame = self.move_arm.get_planning_frame()
+
+        # Remove previous copies if they exist.
+        self.scene.remove_attached_object(end_effector_link, name=self.box_name)
+        self.scene.remove_world_object(self.box_name)
+        rospy.sleep(0.5)
+
+        object_pose = geometry_msgs.msg.PoseStamped()
+        object_pose.header.frame_id = planning_frame
+        object_pose.header.stamp = rospy.Time.now()
+
+        object_pose.pose.position.x = self.object_position.x
+        object_pose.pose.position.y = self.object_position.y
+        object_pose.pose.position.z = OBJECT_SCENE_HEIGHT
+        object_pose.pose.orientation.w = 1.0
+
+        self.scene.add_box(
+            self.box_name,
+            object_pose,
+            size=OBJECT_BOX_SIZE
+        )
+
+        box_added = self.wait_for_planning_scene_update(
+            box_is_known=True,
+            box_is_attached=False,
+            timeout=4.0
+        )
+
+        if not box_added:
+            rospy.logwarn("The object was not confirmed as a known object in MoveIt.")
+            return False
+
+        # Important:
+        # Use all robot links as touch links. This prevents MoveIt from considering
+        # the grasped object as colliding with the gripper/fingers/wrist after closing.
+        touch_links = self.robot.get_link_names()
+        touch_links.append(end_effector_link)
+        touch_links = list(set(touch_links))
+
+        self.scene.attach_box(
+            end_effector_link,
+            self.box_name,
+            touch_links=touch_links
+        )
+
+        box_attached = self.wait_for_planning_scene_update(
+            box_is_known=False,
+            box_is_attached=True,
+            timeout=4.0
+        )
+
+        return box_attached
+
     def execute_grasp_state_machine(self):
         # -------------------------------------------------------------------------
         # BLOCK 10: Part 1 grasping state machine.
@@ -861,10 +942,15 @@ class MoveUR5Node(object):
             return
 
         if self.task_state == "ATTACH_OBJECT":
-            # Do not add/attach the object in the MoveIt planning scene here.
-            # The real object already exists in Gazebo. Adding it again as a MoveIt
-            # collision object after closing the gripper can create START_STATE_IN_COLLISION.
-            rospy.loginfo("Skipping MoveIt attach object to avoid START_STATE_IN_COLLISION.")
+            rospy.loginfo("Adding and attaching object in MoveIt planning scene.")
+
+            attach_success = self.add_and_attach_object_to_moveit_scene()
+
+            if attach_success:
+                rospy.loginfo("Object attached in MoveIt planning scene.")
+            else:
+                rospy.logwarn("MoveIt object attach was not fully confirmed. Continuing with physical Gazebo grasp.")
+
             self.task_state = "LIFT_OBJECT"
             return
 
