@@ -6,6 +6,7 @@
 
 # A template with "TODO" statements is provided to ease the node implementation. 
 
+
 import rospy
 from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge
