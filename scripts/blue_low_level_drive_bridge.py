@@ -22,7 +22,7 @@ MAX_STEERING_ANGLE = 24.0 * pi / 180.0
 VEHICLE_LENGTH = 1.05
 FRONT_TRACK_WIDTH = 0.85
 WHEEL_RADIUS = 0.16
-COMMAND_TIMEOUT = 0.5
+COMMAND_TIMEOUT = 3.0
 
 
 class BlueLowLevelDriveBridge(object):
@@ -40,6 +40,8 @@ class BlueLowLevelDriveBridge(object):
         self.wheel_radius = rospy.get_param("~wheel_radius", WHEEL_RADIUS)
         self.wheel_speed_gain = rospy.get_param("~wheel_speed_gain", 1.0)
         self.invert_wheel_speed = rospy.get_param("~invert_wheel_speed", False)
+
+        self.command_timeout = rospy.get_param("~command_timeout", COMMAND_TIMEOUT)
 
         self.current_speed = 0.0
         self.current_steering_angle = 0.0
@@ -160,7 +162,8 @@ class BlueLowLevelDriveBridge(object):
 
         elapsed_time = time.time() - self.last_command_wall_time
 
-        if elapsed_time > COMMAND_TIMEOUT:
+        if elapsed_time > self.command_timeout:
+            rospy.loginfo("Command timeout: %.3f s", self.command_timeout)
             speed = 0.0
             steering_angle = 0.0
         else:

@@ -3,6 +3,7 @@
 # Intelligent Robotics - Master's Degree in Artificial Intelligence - University of Alicante
 # ROS node for robot BLUE navigation.
 
+import time
 import sys
 import copy
 import rospy
@@ -42,7 +43,7 @@ class BlueTrajectoryPlanner(object):
 
         self.reached_distance = rospy.get_param("~reached_distance", 0.8)
         self.slow_down_distance = rospy.get_param("~slow_down_distance", 2.0)
-        self.rate = rospy.get_param("~rate", 6)
+        self.rate = rospy.get_param("~rate", 10)
 
         # IMPORTANT:
         # Reverse is disabled by default because the rubric asks for navigation
@@ -61,10 +62,15 @@ class BlueTrajectoryPlanner(object):
 
         self.front_obstacle_sector_width = rospy.get_param("~front_obstacle_sector_width", 1.60)
         self.front_obstacle_detection_distance = rospy.get_param("~front_obstacle_detection_distance", 4.50)
-        self.front_obstacle_slow_down_distance = rospy.get_param("~front_obstacle_slow_down_distance", 3.00)
+        self.front_obstacle_slow_down_distance = rospy.get_param("~front_obstacle_slow_down_distance", 1.70)
 
-        self.obstacle_approach_speed = rospy.get_param("~obstacle_approach_speed", 0.45)
-        self.creep_speed = rospy.get_param("~creep_speed", 0.35)
+        self.obstacle_approach_speed = rospy.get_param("~obstacle_approach_speed", 0.85)
+        self.creep_speed = rospy.get_param("~creep_speed", 0.55)
+
+        self.minimum_turn_speed = rospy.get_param("~minimum_turn_speed", 0.65)
+        self.turn_speed_reduction_weight = rospy.get_param("~turn_speed_reduction_weight", 0.35)
+        self.min_turn_speed_factor = rospy.get_param("~min_turn_speed_factor", 0.65)
+
         self.emergency_stop_distance = rospy.get_param("~emergency_stop_distance", 0.85)
 
         # ---------------------------------------------------------------------
@@ -364,8 +370,18 @@ class BlueTrajectoryPlanner(object):
         nearest_front_obstacle_distance = self.nearest_front_obstacle_distance()
 
         if nearest_front_obstacle_distance is not None:
-            if nearest_front_obstacle_distance < self.front_obstacle_slow_down_distance:
-                speed = min(speed, self.obstacle_approach_speed)
+            if nearest_front_obstacle_distance <= self.emergency_stop_distance:
+                speed = min(speed, self.creep_speed)
+
+            elif nearest_front_obstacle_distance < self.front_obstacle_slow_down_distance:
+                distance_range = self.front_obstacle_slow_down_distance - self.emergency_stop_distance
+                distance_ratio = (nearest_front_obstacle_distance - self.emergency_stop_distance) / max(distance_range, 0.01)
+
+                speed_limit = self.creep_speed + distance_ratio * (
+                    self.obstacle_approach_speed - self.creep_speed
+                )
+
+                speed = min(speed, max(speed_limit, self.creep_speed))
 
         min_error = 1000.0
         best_command_found = False
@@ -374,8 +390,19 @@ class BlueTrajectoryPlanner(object):
             if abs(steer) < 0.01:
                 steer = 0.0
 
-            k_sp = (MAX_STEER_ANGLE - abs(steer)) / MAX_STEER_ANGLE
-            speed2 = max(speed * k_sp, self.creep_speed)
+            steer_ratio = abs(steer) / MAX_STEER_ANGLE
+
+            turn_speed_factor = max(
+                self.min_turn_speed_factor,
+                1.0 - self.turn_speed_reduction_weight * steer_ratio
+            )
+
+            minimum_allowed_speed = min(self.minimum_turn_speed, speed)
+
+            speed2 = max(
+                speed * turn_speed_factor,
+                minimum_allowed_speed
+            )
 
             if self.allow_reverse:
                 directions = [-speed2, speed2]
@@ -876,14 +903,10 @@ class BlueTrajectoryPlanner(object):
     # -------------------------------------------------------------------------
 
     def run(self):
-        rate = rospy.Rate(self.rate)
-
         count = 0
+        sleep_time = 1.0 / max(float(self.rate), 1.0)
 
         while not rospy.is_shutdown():
-            # Calculate the local path before the control command.
-            # This avoids using an old frontal local target when an obstacle is
-            # already visible in front of the robot.
             if count == 0:
                 self.localGoalCalculation()
                 count = 3
@@ -891,7 +914,10 @@ class BlueTrajectoryPlanner(object):
                 count -= 1
 
             self.controlActionCalculation()
-            rate.sleep()
+
+            # Use wall-clock sleep instead of rospy.Rate because Gazebo simulated
+            # time can run much slower than real time during heavy visualization.
+            time.sleep(sleep_time)
 
 
 def main():
