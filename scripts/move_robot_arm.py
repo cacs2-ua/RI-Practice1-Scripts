@@ -72,7 +72,7 @@ CLOSE_JOINT_STATE = [
 
 APPROACH_HEIGHT = 0.45
 GRASP_HEIGHT = 0.36
-LIFT_HEIGHT = 0.52
+LIFT_HEIGHT = 0.68
 
 # Partial gripper closing ratio.
 # 0.0 = fully open named target.
@@ -449,9 +449,9 @@ class MoveUR5Node(object):
         ) ** 0.5
 
         # Conservative acceptance thresholds.
-        min_acceptable_lift_z = 0.45
-        max_xy_error = 0.08
-        max_z_error = 0.15
+        min_acceptable_lift_z = 0.60
+        max_xy_error = 0.10
+        max_z_error = 0.10
 
         acceptable = (
             current_position.z >= min_acceptable_lift_z and
@@ -948,10 +948,12 @@ class MoveUR5Node(object):
 
             if attach_success:
                 rospy.loginfo("Object attached in MoveIt planning scene.")
+                self.task_state = "LIFT_OBJECT"
             else:
-                rospy.logwarn("MoveIt object attach was not fully confirmed. Continuing with physical Gazebo grasp.")
+                rospy.logwarn("MoveIt object attach was not confirmed. Retrying attach before lifting.")
+                self.task_state = "ATTACH_OBJECT"
+                rospy.sleep(0.5)
 
-            self.task_state = "LIFT_OBJECT"
             return
 
         if self.task_state == "LIFT_OBJECT":
