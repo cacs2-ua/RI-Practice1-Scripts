@@ -73,6 +73,10 @@ class BlueTrajectoryPlanner(object):
 
         self.emergency_stop_distance = rospy.get_param("~emergency_stop_distance", 0.85)
 
+        self.direct_goal_distance = rospy.get_param("~direct_goal_distance", 3.00)
+        self.direct_goal_clearance = rospy.get_param("~direct_goal_clearance", 0.75)
+        self.goal_heading_weight_near_goal = rospy.get_param("~goal_heading_weight_near_goal", 2.2)
+
         # ---------------------------------------------------------------------
         # Trajectory score weights.
         # ---------------------------------------------------------------------
@@ -201,6 +205,8 @@ class BlueTrajectoryPlanner(object):
         rospy.loginfo("Allow reverse: %s", str(self.allow_reverse))
         rospy.loginfo("Collision margin: %.3f m", self.collision_margin)
         rospy.loginfo("Candidate clearance: %.3f m", self.candidate_clearance)
+        rospy.loginfo("Direct goal distance: %.3f m", self.direct_goal_distance)
+        rospy.loginfo("Direct goal clearance: %.3f m", self.direct_goal_clearance)
         rospy.loginfo("Planning horizon: %.3f s", self.max_sample)
         rospy.loginfo("Target points: %s", self.target_points_to_string())
 
@@ -461,6 +467,13 @@ class BlueTrajectoryPlanner(object):
                     desired_heading = self.angle(self.local_target, final_local_point)
                     orientation_error = abs(self.normalize_angle(desired_heading - final_orientation))
 
+                    goal_distance_for_scoring = self.distance(self.position, self.goal)
+
+                    if goal_distance_for_scoring < self.direct_goal_distance:
+                        effective_orientation_weight = self.goal_heading_weight_near_goal
+                    else:
+                        effective_orientation_weight = self.orientation_error_weight
+
                     if minimum_trajectory_clearance >= 999.0:
                         clearance_error = 0.0
                     else:
@@ -482,10 +495,9 @@ class BlueTrajectoryPlanner(object):
                     if self.avoidance_side_sign != 0.0:
                         if steer * self.avoidance_side_sign < 0.0:
                             side_penalty = self.side_preference_weight
-
                     error = (
                         self.distance_error_weight * distance_error +
-                        self.orientation_error_weight * orientation_error +
+                        effective_orientation_weight * orientation_error +
                         self.clearance_error_weight * clearance_error +
                         reverse_penalty +
                         steering_penalty +
@@ -555,6 +567,32 @@ class BlueTrajectoryPlanner(object):
             return
 
         goal_in_local_axis = self.global2local(self.goal)
+        goal_distance = self.distance(self.position, self.goal)
+
+        # ---------------------------------------------------------------------
+        # Direct final-goal mode.
+        # If the robot is close to the final target and the direct segment to the
+        # goal is not blocked, do not use the obstacle-avoidance ring anymore.
+        # This prevents endless circular motion around the goal.
+        # ---------------------------------------------------------------------
+
+        if goal_distance < self.direct_goal_distance:
+            if not self.is_direct_path_to_goal_blocked(goal_in_local_axis):
+                self.avoidance_side_sign = 0.0
+                self.local_target = copy.deepcopy(goal_in_local_axis)
+                self.local_path = [copy.deepcopy(goal_in_local_axis)]
+                self.publish_local_path_markers()
+
+                rospy.loginfo_throttle(
+                    1.0,
+                    "Direct goal approach mode active | goal_distance=%.3f | local_goal=(%.2f, %.2f)",
+                    goal_distance,
+                    goal_in_local_axis.x,
+                    goal_in_local_axis.y
+                )
+
+                return
+
         self.update_avoidance_side(goal_in_local_axis)
 
         wa, wr, ar, aa = 100.0, 1.0, 0.8, 0.3
@@ -726,6 +764,52 @@ class BlueTrajectoryPlanner(object):
                 "Obstacle ahead detected. Selected avoidance side sign: %.1f",
                 self.avoidance_side_sign
             )
+    def is_direct_path_to_goal_blocked(self, goal_in_local_axis):
+        # -------------------------------------------------------------------------
+        # Direct-path obstacle check.
+        # The final approach can be made directly only if no obstacle lies inside
+        # the corridor between the robot and the goal.
+        # -------------------------------------------------------------------------
+
+        goal_distance = sqrt(
+            goal_in_local_axis.x * goal_in_local_axis.x +
+            goal_in_local_axis.y * goal_in_local_axis.y
+        )
+
+        if goal_distance < 0.001:
+            return False
+
+        goal_unit_x = goal_in_local_axis.x / goal_distance
+        goal_unit_y = goal_in_local_axis.y / goal_distance
+
+        for obstacle in self.obstacles:
+            obstacle_distance = sqrt(obstacle.x * obstacle.x + obstacle.y * obstacle.y)
+
+            if obstacle_distance < self.robot_self_filter_radius:
+                continue
+
+            # Projection of the obstacle over the robot-goal segment.
+            projection = obstacle.x * goal_unit_x + obstacle.y * goal_unit_y
+
+            # Ignore obstacles behind the robot or beyond the goal.
+            if projection <= 0.0:
+                continue
+
+            if projection >= goal_distance:
+                continue
+
+            # Perpendicular distance from obstacle to the robot-goal line.
+            perpendicular_x = obstacle.x - projection * goal_unit_x
+            perpendicular_y = obstacle.y - projection * goal_unit_y
+            perpendicular_distance = sqrt(
+                perpendicular_x * perpendicular_x +
+                perpendicular_y * perpendicular_y
+            )
+
+            if perpendicular_distance < self.direct_goal_clearance:
+                return True
+
+        return False
 
     def is_candidate_blocked_by_obstacle(self, candidate_point):
         candidate_depth, candidate_angle = self.cartesian2Spherical(
