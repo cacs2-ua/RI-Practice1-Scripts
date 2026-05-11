@@ -89,14 +89,6 @@ class BlueTrajectoryPlanner(object):
         # LiDAR points may miss the exact box corner. Inflating obstacle points makes
         # the planner treat obstacle corners as dangerous earlier.
         self.obstacle_point_inflation_radius = rospy.get_param("~obstacle_point_inflation_radius", 0.55)
-        # Bypass exit/recovery parameters.
-        # These prevent the robot from continuing to turn as if the obstacle were
-        # still in front after it has already reached the side of the obstacle.
-        self.bypass_exit_front_distance = rospy.get_param("~bypass_exit_front_distance", 0.75)
-        self.bypass_exit_side_minimum_score = rospy.get_param("~bypass_exit_side_minimum_score", 4.0)
-        self.bypass_exit_side_ratio = rospy.get_param("~bypass_exit_side_ratio", 2.0)
-        self.recovery_forward_speed = rospy.get_param("~recovery_forward_speed", 0.75)
-        self.recovery_max_steering_angle = rospy.get_param("~recovery_max_steering_angle", 0.16)
         # Vehicle footprint parameters.
         # These values approximate the physical space occupied by BLUE around the
         # local trajectory point. This avoids the previous failure where the
@@ -553,32 +545,17 @@ class BlueTrajectoryPlanner(object):
                         ackermann_control.speed = dir
 
         if not selected_command_found:
-            recovery_command = self.compute_bypass_recovery_command()
+            escape_speed, escape_steering_angle = self.compute_emergency_avoidance_command()
 
-            if recovery_command is not None:
-                recovery_speed, recovery_steering_angle = recovery_command
+            rospy.logwarn_throttle(
+                1.0,
+                "No collision-free local trajectory found. Executing emergency avoidance: speed=%.2f, steering=%.2f",
+                escape_speed,
+                escape_steering_angle
+            )
 
-                rospy.logwarn_throttle(
-                    1.0,
-                    "Obstacle is now beside the robot. Recovering toward goal: speed=%.2f, steering=%.2f",
-                    recovery_speed,
-                    recovery_steering_angle
-                )
-
-                ackermann_control.speed = recovery_speed
-                ackermann_control.steering_angle = recovery_steering_angle
-            else:
-                escape_speed, escape_steering_angle = self.compute_emergency_avoidance_command()
-
-                rospy.logwarn_throttle(
-                    1.0,
-                    "No collision-free local trajectory found. Executing emergency avoidance: speed=%.2f, steering=%.2f",
-                    escape_speed,
-                    escape_steering_angle
-                )
-
-                ackermann_control.speed = escape_speed
-                ackermann_control.steering_angle = escape_steering_angle
+            ackermann_control.speed = escape_speed
+            ackermann_control.steering_angle = escape_steering_angle
 
         #Publish message
         self.ackermann_command_publisher.publish(ackermann_control)
@@ -596,15 +573,6 @@ class BlueTrajectoryPlanner(object):
             return
 
         if not self.navigation_enabled:
-            return
-
-        # If an obstacle is already beside BLUE after the bypass, stop forcing the
-        # lateral bypass target. At this point the robot must recover toward the
-        # real goal instead of continuing to turn away forever.
-        if self.is_obstacle_alongside_after_bypass():
-            self.local_target = self.global2local(self.goal)
-            self.local_path = [self.local_target]
-            self.publish_local_path_markers()
             return
 
         # If an obstacle is directly in front of BLUE, force a lateral bypass
@@ -852,102 +820,6 @@ class BlueTrajectoryPlanner(object):
             return min(requested_speed, 0.75)
 
         return requested_speed
-
-
-    def compute_side_scores_near_robot(self):
-        # -------------------------------------------------------------------------
-        # BLOCK: Side occupancy analysis.
-        # Computes how much obstacle evidence exists on the left and right sides
-        # near the robot. Positive y is left, negative y is right in the local frame.
-        # -------------------------------------------------------------------------
-
-        left_score = 0.0
-        right_score = 0.0
-        closest_front_obstacle = 1000.0
-
-        for obstacle in self.obstacles:
-            # Consider only points around the front/side area of the robot.
-            if -0.30 <= obstacle.x <= self.bypass_trigger_distance:
-                obstacle_distance = max(0.30, sqrt(obstacle.x ** 2 + obstacle.y ** 2))
-                score = 1.0 / obstacle_distance
-
-                if obstacle.y >= 0.0:
-                    left_score += score
-                else:
-                    right_score += score
-
-            if (
-                0.0 <= obstacle.x <= self.bypass_trigger_distance and
-                abs(obstacle.y) <= self.bypass_front_half_width
-            ):
-                closest_front_obstacle = min(closest_front_obstacle, obstacle.x)
-
-        return left_score, right_score, closest_front_obstacle
-
-
-    def is_obstacle_alongside_after_bypass(self):
-        # -------------------------------------------------------------------------
-        # BLOCK: Bypass exit condition.
-        # If the closest "front" obstacle is extremely close in x but most obstacle
-        # evidence is clearly on only one side, the robot is beside the obstacle,
-        # not approaching it frontally. In that case the forced bypass must stop.
-        # -------------------------------------------------------------------------
-
-        if len(self.obstacles) == 0:
-            return False
-
-        left_score, right_score, closest_front_obstacle = self.compute_side_scores_near_robot()
-
-        obstacle_mostly_on_right = (
-            right_score >= self.bypass_exit_side_minimum_score and
-            right_score >= self.bypass_exit_side_ratio * max(1.0, left_score)
-        )
-
-        obstacle_mostly_on_left = (
-            left_score >= self.bypass_exit_side_minimum_score and
-            left_score >= self.bypass_exit_side_ratio * max(1.0, right_score)
-        )
-
-        obstacle_is_alongside = (
-            closest_front_obstacle <= self.bypass_exit_front_distance and
-            (obstacle_mostly_on_right or obstacle_mostly_on_left)
-        )
-
-        if obstacle_is_alongside:
-            rospy.logwarn_throttle(
-                1.0,
-                "Bypass exit active: obstacle alongside. left_score=%.3f, right_score=%.3f, closest_front=%.3f",
-                left_score,
-                right_score,
-                closest_front_obstacle
-            )
-
-        return obstacle_is_alongside
-
-
-    def compute_bypass_recovery_command(self):
-        # -------------------------------------------------------------------------
-        # BLOCK: Bypass recovery command.
-        # When the obstacle is beside the robot, do not keep maximum steering away
-        # from it. Move forward and apply only a mild steering command toward the
-        # real goal. This lets BLUE leave the obstacle behind and rejoin the path.
-        # -------------------------------------------------------------------------
-
-        if not self.is_obstacle_alongside_after_bypass():
-            return None
-
-        goal_in_local_axis = self.global2local(self.goal)
-
-        desired_heading = atan2(goal_in_local_axis.y, max(0.30, goal_in_local_axis.x))
-
-        recovery_steering_angle = max(
-            -self.recovery_max_steering_angle,
-            min(self.recovery_max_steering_angle, desired_heading)
-        )
-
-        recovery_speed = max(MIN_SPEED, self.recovery_forward_speed)
-
-        return recovery_speed, recovery_steering_angle
 
 
     def compute_explicit_bypass_target(self):
