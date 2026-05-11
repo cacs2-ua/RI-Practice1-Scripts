@@ -115,15 +115,6 @@ class BlueTrajectoryPlanner(object):
         self.obstacle_slowdown_distance = rospy.get_param("~obstacle_slowdown_distance", 3.40)
         self.obstacle_slowdown_half_width = rospy.get_param("~obstacle_slowdown_half_width", 1.20)
 
-        # Decision filtering parameters.
-        # Important: inflated obstacle points are good for collision checking, but
-        # they must not be used to decide whether the obstacle is still in front.
-        # Otherwise, inflated points around x ~= 0 make the robot think the obstacle
-        # is frontal forever even when it is already beside the vehicle.
-        self.decision_minimum_front_x = rospy.get_param("~decision_minimum_front_x", 0.45)
-        self.side_obstacle_minimum_x = rospy.get_param("~side_obstacle_minimum_x", -0.10)
-        self.recovery_away_steering_angle = rospy.get_param("~recovery_away_steering_angle", 0.05)
-
         # -------------------------------------------------------------------------
         # BLOCK 3: Runtime variables.
         # self.position and self.theta represent the current BLUE pose.
@@ -134,7 +125,6 @@ class BlueTrajectoryPlanner(object):
         self.position = None
         self.theta = 0
         self.obstacles = []
-        self.raw_obstacles = []
         self.limits = None
         self.goal_reached = False #Wait until UR5 tells us to approach.
 
@@ -325,7 +315,6 @@ class BlueTrajectoryPlanner(object):
 
         #Save as geometry_msg.Point
         self.obstacles = []
-        self.raw_obstacles = []
 
         # -------------------------------------------------------------------------
         # BLOCK: Inflated obstacle cloud.
@@ -351,12 +340,6 @@ class BlueTrajectoryPlanner(object):
         for point in pc_obstacles:
             x, y, z = point
 
-            # Store the original LiDAR obstacle point for high-level decisions.
-            # This avoids false "front obstacle" detections caused by inflated points.
-            raw_point = geometry_msgs.msg.Point(x, y, z)
-            self.raw_obstacles.append(raw_point)
-
-            # Store inflated points only for collision checking.
             for offset_x, offset_y in inflation_offsets:
                 new_point = geometry_msgs.msg.Point(
                     x + offset_x,
@@ -648,7 +631,6 @@ class BlueTrajectoryPlanner(object):
         local_goal = geometry_msgs.msg.Point()
         self.local_path = []
         goal_in_local_axis = self.global2local(self.goal)
-        decision_obstacles = self.get_decision_obstacles()
 
         # 1) Trajectory points within the limited radius.
         for limit_point in self.limits:
@@ -662,7 +644,7 @@ class BlueTrajectoryPlanner(object):
             min_distance = 10000.0
             force_r = 0.0
 
-            for obstacle_point in decision_obstacles:
+            for obstacle_point in self.obstacles:
                 distance_r = self.distance(limit_point, obstacle_point)
                 if distance_r < 0.1:
                     distance_r = 0.1
@@ -706,7 +688,7 @@ class BlueTrajectoryPlanner(object):
                 min_distance = 10000.0
                 force_r = 0.0
 
-                for obstacle_point in decision_obstacles:
+                for obstacle_point in self.obstacles:
                     distance_r = self.distance(p_in, obstacle_point)
                     if distance_r < 0.1:
                         distance_r = 0.1
@@ -801,20 +783,6 @@ class BlueTrajectoryPlanner(object):
 
 
 
-    def get_decision_obstacles(self):
-        # -------------------------------------------------------------------------
-        # BLOCK: Decision obstacle cloud selector.
-        # self.obstacles is inflated and must be used for collision checking.
-        # self.raw_obstacles is not inflated and must be used for front/side/bypass
-        # decisions. If raw data is not available yet, fall back safely.
-        # -------------------------------------------------------------------------
-
-        if hasattr(self, "raw_obstacles") and len(self.raw_obstacles) > 0:
-            return self.raw_obstacles
-
-        return self.obstacles
-
-
     def vehicle_footprint_clearance(self, vehicle_pose, vehicle_heading, obstacle_point):
         # -------------------------------------------------------------------------
         # BLOCK: Vehicle footprint clearance.
@@ -858,9 +826,9 @@ class BlueTrajectoryPlanner(object):
 
         closest_distance = float("inf")
 
-        for obstacle in self.get_decision_obstacles():
+        for obstacle in self.obstacles:
             if (
-                self.decision_minimum_front_x <= obstacle.x <= self.obstacle_slowdown_distance and
+                0.0 <= obstacle.x <= self.obstacle_slowdown_distance and
                 abs(obstacle.y) <= self.obstacle_slowdown_half_width
             ):
                 closest_distance = min(closest_distance, obstacle.x)
@@ -897,11 +865,9 @@ class BlueTrajectoryPlanner(object):
         right_score = 0.0
         closest_front_obstacle = 1000.0
 
-        for obstacle in self.get_decision_obstacles():
+        for obstacle in self.obstacles:
             # Consider only points around the front/side area of the robot.
-            # Points already clearly behind the robot are ignored, otherwise the
-            # recovery mode may remain active for too long.
-            if self.side_obstacle_minimum_x <= obstacle.x <= self.bypass_trigger_distance:
+            if -0.30 <= obstacle.x <= self.bypass_trigger_distance:
                 obstacle_distance = max(0.30, sqrt(obstacle.x ** 2 + obstacle.y ** 2))
                 score = 1.0 / obstacle_distance
 
@@ -911,7 +877,7 @@ class BlueTrajectoryPlanner(object):
                     right_score += score
 
             if (
-                self.decision_minimum_front_x <= obstacle.x <= self.bypass_trigger_distance and
+                0.0 <= obstacle.x <= self.bypass_trigger_distance and
                 abs(obstacle.y) <= self.bypass_front_half_width
             ):
                 closest_front_obstacle = min(closest_front_obstacle, obstacle.x)
@@ -942,13 +908,8 @@ class BlueTrajectoryPlanner(object):
             left_score >= self.bypass_exit_side_ratio * max(1.0, right_score)
         )
 
-        frontal_obstacle_is_not_dominant = (
-            closest_front_obstacle >= 999.0 or
-            closest_front_obstacle <= self.bypass_exit_front_distance
-        )
-
         obstacle_is_alongside = (
-            frontal_obstacle_is_not_dominant and
+            closest_front_obstacle <= self.bypass_exit_front_distance and
             (obstacle_mostly_on_right or obstacle_mostly_on_left)
         )
 
@@ -975,35 +936,14 @@ class BlueTrajectoryPlanner(object):
         if not self.is_obstacle_alongside_after_bypass():
             return None
 
-        left_score, right_score, closest_front_obstacle = self.compute_side_scores_near_robot()
         goal_in_local_axis = self.global2local(self.goal)
 
         desired_heading = atan2(goal_in_local_axis.y, max(0.30, goal_in_local_axis.x))
 
-        goal_steering_angle = max(
+        recovery_steering_angle = max(
             -self.recovery_max_steering_angle,
             min(self.recovery_max_steering_angle, desired_heading)
         )
-
-        obstacle_mostly_on_right = (
-            right_score >= self.bypass_exit_side_minimum_score and
-            right_score >= self.bypass_exit_side_ratio * max(1.0, left_score)
-        )
-
-        obstacle_mostly_on_left = (
-            left_score >= self.bypass_exit_side_minimum_score and
-            left_score >= self.bypass_exit_side_ratio * max(1.0, right_score)
-        )
-
-        # Do not recover by steering into the obstacle. If the obstacle is on the
-        # right and the goal is also to the right, drive almost straight/slightly
-        # left until the obstacle is behind. Symmetric case for the left side.
-        if obstacle_mostly_on_right and goal_steering_angle < 0.0:
-            recovery_steering_angle = self.recovery_away_steering_angle
-        elif obstacle_mostly_on_left and goal_steering_angle > 0.0:
-            recovery_steering_angle = -self.recovery_away_steering_angle
-        else:
-            recovery_steering_angle = goal_steering_angle
 
         recovery_speed = max(MIN_SPEED, self.recovery_forward_speed)
 
@@ -1022,9 +962,9 @@ class BlueTrajectoryPlanner(object):
 
         frontal_obstacles = []
 
-        for obstacle in self.get_decision_obstacles():
+        for obstacle in self.obstacles:
             if (
-                self.decision_minimum_front_x <= obstacle.x <= self.bypass_trigger_distance and
+                0.35 <= obstacle.x <= self.bypass_trigger_distance and
                 abs(obstacle.y) <= self.bypass_front_half_width
             ):
                 frontal_obstacles.append(obstacle)
@@ -1037,8 +977,8 @@ class BlueTrajectoryPlanner(object):
         left_score = 0.0
         right_score = 0.0
 
-        for obstacle in self.get_decision_obstacles():
-            if self.side_obstacle_minimum_x <= obstacle.x <= self.bypass_trigger_distance:
+        for obstacle in self.obstacles:
+            if 0.0 <= obstacle.x <= self.bypass_trigger_distance:
                 obstacle_distance = max(0.30, sqrt(obstacle.x ** 2 + obstacle.y ** 2))
                 score = 1.0 / obstacle_distance
 
@@ -1123,7 +1063,7 @@ class BlueTrajectoryPlanner(object):
         right_obstacle_score = 0.0
         closest_front_obstacle = 1000.0
 
-        for obstacle in self.get_decision_obstacles():
+        for obstacle in self.obstacles:
             # Ignore obstacles behind the robot for the emergency side decision.
             if obstacle.x < 0.0:
                 continue
