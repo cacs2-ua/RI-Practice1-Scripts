@@ -48,13 +48,13 @@ class BlueTrajectoryPlanner(object):
         #Parameter initialization
         self.delta_angle = rospy.get_param("~delta_angle", 6.0*pi/180.0)
         self.delta_sample = rospy.get_param("~delta_sample", 0.20)
-        self.max_sample = rospy.get_param("~max_sample", 3.00)
+        self.max_sample = rospy.get_param("~max_sample", 2.00)
         self.reached_distance = rospy.get_param("~reached_distance", 1.00)
         self.slow_down_distance = rospy.get_param("~slow_down_distance", 2.00)
         self.rate = rospy.get_param("~rate", 5)
 
         #TODO Define other parameters needed for the planner.
-        self.collision_margin = rospy.get_param("~collision_margin", 0.32)
+        self.collision_margin = rospy.get_param("~collision_margin", 0.55)
         self.trajectory_distance_weight = rospy.get_param("~trajectory_distance_weight", 1.00)
         self.trajectory_heading_weight = rospy.get_param("~trajectory_heading_weight", 0.70)
         self.trajectory_steering_weight = rospy.get_param("~trajectory_steering_weight", 0.10)
@@ -64,15 +64,6 @@ class BlueTrajectoryPlanner(object):
         self.use_ground_truth_fallback = rospy.get_param("~use_ground_truth_fallback", True)
         self.wait_for_ur5_signal = rospy.get_param("~wait_for_ur5_signal", False)
         self.minimum_camera_motion_for_heading = rospy.get_param("~minimum_camera_motion_for_heading", 0.05)
-
-        # Emergency avoidance parameters.
-        # If all candidate trajectories are rejected, the robot does not stop forever.
-        # It turns toward the side with more free space and moves slowly until normal
-        # trajectory sampling becomes possible again.
-        self.emergency_avoidance_speed = rospy.get_param("~emergency_avoidance_speed", 0.75)
-        self.front_block_distance = rospy.get_param("~front_block_distance", 2.60)
-        self.front_block_half_width = rospy.get_param("~front_block_half_width", 1.00)
-        self.side_clearance_distance = rospy.get_param("~side_clearance_distance", 3.20)
 
         # -------------------------------------------------------------------------
         # BLOCK 3: Runtime variables.
@@ -464,17 +455,12 @@ class BlueTrajectoryPlanner(object):
                         ackermann_control.speed = dir
 
         if not selected_command_found:
-            escape_speed, escape_steering_angle = self.compute_emergency_avoidance_command()
-
             rospy.logwarn_throttle(
                 1.0,
-                "No collision-free local trajectory found. Executing emergency avoidance: speed=%.2f, steering=%.2f",
-                escape_speed,
-                escape_steering_angle
+                "No collision-free local trajectory found. Stopping BLUE."
             )
-
-            ackermann_control.speed = escape_speed
-            ackermann_control.steering_angle = escape_steering_angle
+            ackermann_control.speed = 0.0
+            ackermann_control.steering_angle = 0.0
 
         #Publish message
         self.ackermann_command_publisher.publish(ackermann_control)
@@ -676,75 +662,6 @@ class BlueTrajectoryPlanner(object):
             azimuth -= 2*pi
 
         return depth, azimuth
-
-
-
-    def compute_emergency_avoidance_command(self):
-        # -------------------------------------------------------------------------
-        # BLOCK: Emergency obstacle avoidance.
-        # If every sampled trajectory is rejected, the robot chooses the side with
-        # fewer/less dangerous obstacle points and performs a controlled curved
-        # forward maneuver instead of stopping forever.
-        # -------------------------------------------------------------------------
-
-        if len(self.obstacles) == 0:
-            return 0.0, 0.0
-
-        left_obstacle_score = 0.0
-        right_obstacle_score = 0.0
-        closest_front_obstacle = 1000.0
-
-        for obstacle in self.obstacles:
-            # Ignore obstacles behind the robot for the emergency side decision.
-            if obstacle.x < 0.0:
-                continue
-
-            # Check whether the frontal corridor is blocked.
-            if (
-                0.0 <= obstacle.x <= self.front_block_distance and
-                abs(obstacle.y) <= self.front_block_half_width
-            ):
-                closest_front_obstacle = min(closest_front_obstacle, obstacle.x)
-
-            # Score left and right side occupancy.
-            # Lower score means more free space.
-            if 0.0 <= obstacle.x <= self.side_clearance_distance:
-                distance_weight = 1.0 / max(0.25, sqrt(obstacle.x ** 2 + obstacle.y ** 2))
-
-                if obstacle.y >= 0.0:
-                    left_obstacle_score += distance_weight
-                else:
-                    right_obstacle_score += distance_weight
-
-        # If the left side is more occupied, turn right. Otherwise, turn left.
-        if left_obstacle_score > right_obstacle_score:
-            steering_direction = -1.0
-        elif right_obstacle_score > left_obstacle_score:
-            steering_direction = 1.0
-        else:
-            # Tie-breaker: turn toward the local target side if possible.
-            target_in_local_axis = self.global2local(self.goal)
-            steering_direction = 1.0 if target_in_local_axis.y >= 0.0 else -1.0
-
-        # If the obstacle is extremely close, use a lower speed but still try to escape.
-        # The practice requires avoidance, not deadlock.
-        if closest_front_obstacle < 0.90:
-            escape_speed = MIN_SPEED
-        else:
-            escape_speed = max(MIN_SPEED, self.emergency_avoidance_speed)
-
-        escape_steering_angle = steering_direction * MAX_STEER_ANGLE
-
-        rospy.logwarn_throttle(
-            1.0,
-            "Emergency avoidance side decision: left_score=%.3f, right_score=%.3f, closest_front=%.3f, direction=%s",
-            left_obstacle_score,
-            right_obstacle_score,
-            closest_front_obstacle,
-            "LEFT" if steering_direction > 0.0 else "RIGHT"
-        )
-
-        return escape_speed, escape_steering_angle
 
 
     def run(self):
