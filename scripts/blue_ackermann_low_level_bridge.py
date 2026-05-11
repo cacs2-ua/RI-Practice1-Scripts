@@ -24,10 +24,7 @@ import std_msgs.msg
 from math import fabs
 
 
-# -------------------------------------------------------------------------
-# BLOCK 1: Utility clamp function.
 # This prevents sending unsafe values to the Gazebo low-level controllers.
-# -------------------------------------------------------------------------
 
 def clamp(value, minimum_value, maximum_value):
     return max(min(value, maximum_value), minimum_value)
@@ -36,22 +33,14 @@ def clamp(value, minimum_value, maximum_value):
 class BlueAckermannLowLevelBridge(object):
 
     def __init__(self):
-        # -------------------------------------------------------------------------
-        # BLOCK 2: ROS node initialization.
         # This node is intentionally separated from blue_navigation.py so that the
         # planner remains focused on trajectory generation and this bridge remains
         # focused on low-level actuation.
-        # -------------------------------------------------------------------------
-
         rospy.init_node("blue_ackermann_low_level_bridge", anonymous=True)
 
-        # -------------------------------------------------------------------------
-        # BLOCK 3: Runtime parameters.
         # These parameters can be tuned from rosrun without editing the file.
         # If the car moves backwards, set _wheel_speed_sign:=-1.0.
         # If the steering is inverted, set _steering_angle_sign:=-1.0.
-        # -------------------------------------------------------------------------
-
         self.wheel_radius = rospy.get_param("~wheel_radius", 0.30)
         self.wheel_speed_sign = rospy.get_param("~wheel_speed_sign", 1.0)
         self.steering_angle_sign = rospy.get_param("~steering_angle_sign", 1.0)
@@ -87,21 +76,13 @@ class BlueAckermannLowLevelBridge(object):
             "/blue/right_steering_ctrlr/command"
         )
 
-        # -------------------------------------------------------------------------
-        # BLOCK 4: Internal command state.
         # The latest Ackermann command is stored and continuously republished to
         # the low-level controllers. If commands stop arriving, the robot stops.
-        # -------------------------------------------------------------------------
-
         self.last_command_time = rospy.Time(0)
         self.target_wheel_angular_velocity = 0.0
         self.target_steering_angle = 0.0
 
-        # -------------------------------------------------------------------------
-        # BLOCK 5: Low-level publishers.
         # These topics should be consumed by Gazebo velocity/position controllers.
-        # -------------------------------------------------------------------------
-
         self.left_rear_wheel_publisher = rospy.Publisher(
             self.left_rear_wheel_topic,
             std_msgs.msg.Float64,
@@ -126,12 +107,8 @@ class BlueAckermannLowLevelBridge(object):
             queue_size=10
         )
 
-        # -------------------------------------------------------------------------
-        # BLOCK 6: Ackermann command subscriber.
         # This is the missing subscriber that must appear in:
         #   rostopic info /blue/ackermann_cmd
-        # -------------------------------------------------------------------------
-
         self.ackermann_command_subscriber = rospy.Subscriber(
             self.ackermann_command_topic,
             ackermann_msgs.msg.AckermannDrive,
@@ -155,16 +132,12 @@ class BlueAckermannLowLevelBridge(object):
 
 
     def ackermann_command_callback(self, ackermann_command):
-        # -------------------------------------------------------------------------
-        # BLOCK 7: Ackermann-to-controller conversion.
         # The planner sends:
         #   speed in m/s
         #   steering_angle in rad
         #
         # This bridge converts speed into wheel angular velocity:
         #   rad/s = m/s / wheel_radius
-        # -------------------------------------------------------------------------
-
         if self.wheel_radius <= 0.0:
             rospy.logwarn_throttle(1.0, "Invalid wheel radius. Stopping robot.")
             self.target_wheel_angular_velocity = 0.0
@@ -195,12 +168,8 @@ class BlueAckermannLowLevelBridge(object):
 
 
     def publish_low_level_commands(self):
-        # -------------------------------------------------------------------------
-        # BLOCK 8: Safe low-level command publication.
         # If the planner stops publishing commands, the bridge sends zero velocity
         # and zero steering angle after command_timeout seconds.
-        # -------------------------------------------------------------------------
-
         current_time = rospy.Time.now()
         time_since_last_command = (current_time - self.last_command_time).to_sec()
 
@@ -225,11 +194,7 @@ class BlueAckermannLowLevelBridge(object):
 
 
     def run(self):
-        # -------------------------------------------------------------------------
-        # BLOCK 9: Main loop.
         # The bridge continuously republishes the latest safe low-level command.
-        # -------------------------------------------------------------------------
-
         rate = rospy.Rate(self.publish_rate)
 
         while not rospy.is_shutdown():

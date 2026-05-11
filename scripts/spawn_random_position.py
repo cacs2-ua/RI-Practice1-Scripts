@@ -17,11 +17,9 @@ if __name__ == '__main__':
     with open(rospkg.RosPack().get_path("robotica_inteligente")+"/models/object/model.sdf", "r") as f:
         object_model = f.read()
         
-    # -------------------------------------------------------------------------
-    # BLOCK: Red object spawn position near the UR5 gripper working area.
+    # Red object spawn position near the UR5 gripper working area.
     # The object is spawned around a point that is reachable by the UR5 and close
     # to the grasping position previously validated from /pose_array.
-    # -------------------------------------------------------------------------
 
     mu = np.array([0.56, -0.25])
     point = mu.copy()

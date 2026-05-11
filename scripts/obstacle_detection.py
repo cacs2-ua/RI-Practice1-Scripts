@@ -14,25 +14,21 @@ from std_msgs.msg import Header
 import numpy as np
 
 
-# -------------------------------------------------------------------------
-# BLOCK 1: Publisher definition.
+# Publisher definition.
 # These publishers are initialized in main() and used by publish_topics().
-# -------------------------------------------------------------------------
 
 # Publisher definition
 pub_obstacles = None
 pub_freezone = None
 
 
-# -------------------------------------------------------------------------
-# BLOCK 2: Obstacle detection configuration.
+# Obstacle detection configuration.
 # altura is the minimum Z value, expressed in the Velodyne frame, from which a
 # point is considered part of an obstacle. Since the LiDAR is mounted above the
 # floor, floor points usually have negative Z values.
 #
 # radio is the local planning radius. The free-zone ring is generated at this
 # radius around the BLUE robot.
-# -------------------------------------------------------------------------
 
 # Define the height to consider the obstacles and the radius to detect them. Both variables
 # are expressed in meters.
@@ -74,11 +70,9 @@ def filter_obstacles_function(point_cloud_in, altura):
         # Note: The points added to "obstacle_points" are projected to the "altura" value, that is to say,
         # the obstacle coordinates (x,y,z) will change to (x,y,altura)
 
-        # -------------------------------------------------------------------------
-        # BLOCK 3: Height and range obstacle filter.
+        # Height and range obstacle filter.
         # Points above altura are treated as obstacles. Very close points are ignored
         # to avoid self-detections from the BLUE robot body.
-        # -------------------------------------------------------------------------
 
         if z > altura and MINIMUM_VALID_RANGE <= planar_distance <= radio:
 
@@ -99,12 +93,10 @@ def free_zone_function(point_cloud_in, radio, altura):
     # Array containing the parameters of the point cloud representing the area free of obstacles
     free_zone = []
 
-    # -------------------------------------------------------------------------
-    # BLOCK 4: Angular occupancy grid around the robot.
+    # Angular occupancy grid around the robot.
     # Each angular bin represents a direction around BLUE. If an obstacle is found
     # inside the planning radius, that direction and a small angular margin are
     # marked as blocked. The remaining bins are published as the free-zone ring.
-    # -------------------------------------------------------------------------
 
     blocked_angular_bins = set()
     angular_resolution = 2.0 * np.pi / float(ANGULAR_BINS)
@@ -133,11 +125,9 @@ def free_zone_function(point_cloud_in, radio, altura):
             for bin_offset in range(-ANGULAR_INFLATION_BINS, ANGULAR_INFLATION_BINS + 1):
                 blocked_angular_bins.add((bin_index + bin_offset) % ANGULAR_BINS)
 
-    # -------------------------------------------------------------------------
-    # BLOCK 5: Free-zone ring generation.
+    # Free-zone ring generation.
     # A point is generated at the selected radius for each non-blocked direction.
     # These are the green candidate points used by the local planner.
-    # -------------------------------------------------------------------------
 
     for bin_index in range(ANGULAR_BINS):
         if bin_index in blocked_angular_bins:
@@ -199,10 +189,8 @@ def main():
 
     global pub_obstacles, pub_freezone, altura, radio
 
-    # -------------------------------------------------------------------------
-    # BLOCK 6: Runtime parameters.
+    # Runtime parameters.
     # These parameters allow tuning from rosrun/roslaunch without editing the file.
-    # -------------------------------------------------------------------------
 
     altura = rospy.get_param("~obstacle_height_threshold", altura)
     radio = rospy.get_param("~free_zone_radius", radio)

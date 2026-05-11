@@ -25,11 +25,9 @@ from math import pi, dist, cos, fabs
 from moveit_commander.conversions import pose_to_list
 
 
-# -------------------------------------------------------------------------
-# BLOCK 1: Global configuration of the UR5 position and default joint states.
+# Global configuration of the UR5 position and default joint states.
 # ROBOT_POSITION represents the global reference position used to convert the
 # RGB-D object localization into the UR5 planning reference.
-# -------------------------------------------------------------------------
 
 #TODO Define the global position of the robot.
 ROBOT_POSITION = geometry_msgs.msg.Point(x=0.0, y=0.0, z=0.0)
@@ -64,11 +62,9 @@ CLOSE_JOINT_STATE = [
 ]
 
 
-# -------------------------------------------------------------------------
-# BLOCK 2: Cartesian grasping parameters.
+# Cartesian grasping parameters.
 # These values define the approach height, grasp height, and lift height used
 # by the grasping state machine.
-# -------------------------------------------------------------------------
 
 APPROACH_HEIGHT = 0.45
 GRASP_HEIGHT = 0.36
@@ -110,11 +106,9 @@ class MoveUR5Node(object):
         moveit_commander.roscpp_initialize(sys.argv)
         rospy.init_node("move_UR5_node", anonymous=True)
 
-        # -------------------------------------------------------------------------
-        # BLOCK 3: Runtime parameters.
+        # Runtime parameters.
         # These parameters allow the UR5 global reference to be adjusted without
         # editing the Python file.
-        # -------------------------------------------------------------------------
 
         ROBOT_POSITION.x = rospy.get_param("~robot_global_x", ROBOT_POSITION.x)
         ROBOT_POSITION.y = rospy.get_param("~robot_global_y", ROBOT_POSITION.y)
@@ -128,11 +122,9 @@ class MoveUR5Node(object):
             PARTIAL_GRIPPER_CLOSE_RATIO
         )
         
-        # -------------------------------------------------------------------------
-        # BLOCK: Runtime movement strategy parameters.
+        # Runtime movement strategy parameters.
         # These parameters allow switching between direct Cartesian movement and
         # standard MoveIt pose planning without editing the file again.
-        # -------------------------------------------------------------------------
 
         self.use_home_before_grasp = rospy.get_param("~use_home_before_grasp", USE_HOME_BEFORE_GRASP)
         self.use_cartesian_path_for_grasp = rospy.get_param("~use_cartesian_path_for_grasp", USE_CARTESIAN_PATH_FOR_GRASP)
@@ -177,11 +169,9 @@ class MoveUR5Node(object):
         self.move_arm = moveit_commander.MoveGroupCommander("arm", wait_for_servers=30.0)
         self.move_gripper = moveit_commander.MoveGroupCommander("gripper", wait_for_servers=30.0)
 
-        # -------------------------------------------------------------------------
-        # BLOCK 4: MoveIt planning configuration.
+        # MoveIt planning configuration.
         # The planning time, number of attempts, and motion scaling factors are
         # configured to reduce random planning failures and make motion safer.
-        # -------------------------------------------------------------------------
 
         self.move_arm.set_planning_time(10.0)
         self.move_arm.set_num_planning_attempts(10)
@@ -198,10 +188,8 @@ class MoveUR5Node(object):
         self.task_state = "WAIT_FOR_OBJECT"
         self.grasp_orientation = None
 
-        # -------------------------------------------------------------------------
-        # BLOCK 5: Scene reset and initial robot configuration.
+        # Scene reset and initial robot configuration.
         # The gripper is opened first, and the arm is moved to a known home state.
-        # -------------------------------------------------------------------------
 
         #Remove all the objects in the scene, if there are.
         self.scene.remove_attached_object(self.move_arm.get_end_effector_link())
@@ -245,10 +233,8 @@ class MoveUR5Node(object):
 
         # Check if the object has been detected. It is communicated through the position in z.
 
-        # -------------------------------------------------------------------------
-        # BLOCK 6: Object detection callback.
+        # Object detection callback.
         # The red object is expected in poses[0]. If z < 0, the detection is invalid.
-        # -------------------------------------------------------------------------
 
         if len(pose_array.poses) == 0:
             return
@@ -263,11 +249,9 @@ class MoveUR5Node(object):
         self.object_detected = True
 
     def convert_global_object_to_arm_frame(self, object_global_position):
-        # -------------------------------------------------------------------------
-        # BLOCK 7: Global-to-UR5 coordinate conversion.
+        # Global-to-UR5 coordinate conversion.
         # The RGB-D localization is converted into the local reference used by the
         # UR5 planning task.
-        # -------------------------------------------------------------------------
 
         object_arm_position = geometry_msgs.msg.Point()
         object_arm_position.x = object_global_position.x - ROBOT_POSITION.x
@@ -277,13 +261,11 @@ class MoveUR5Node(object):
         return object_arm_position
 
     def get_grasp_target_position(self):
-        # -------------------------------------------------------------------------
-        # BLOCK: Grasp target correction.
+        # Grasp target correction.
         # The RGB-D system detects the center of the red object, but the Cartesian
         # target sent to MoveIt corresponds to the end-effector frame. Since the
         # end-effector frame is not exactly the center between the fingers, a small
         # x/y offset is applied to align the gripper around the object.
-        # -------------------------------------------------------------------------
 
         grasp_target_position = geometry_msgs.msg.Point()
         grasp_target_position.x = self.object_position.x + self.grasp_target_x_offset
@@ -293,12 +275,10 @@ class MoveUR5Node(object):
         return grasp_target_position
 
     def print_grasp_alignment_error(self, grasp_pose):
-        # -------------------------------------------------------------------------
-        # BLOCK: Grasp alignment diagnostic after descent.
+        # Grasp alignment diagnostic after descent.
         # This function compares the current end-effector position with the detected
         # red object position and the commanded grasp target. It is used to estimate
         # how much x/y offset should be applied in the next execution.
-        # -------------------------------------------------------------------------
 
         current_pose = self.move_arm.get_current_pose().pose
         current_position = current_pose.position
@@ -384,12 +364,10 @@ class MoveUR5Node(object):
         rospy.logwarn("================================================")
 
     def is_grasp_pose_acceptable(self, grasp_pose):
-        # -------------------------------------------------------------------------
-        # BLOCK: Verified grasp-pose acceptance.
+        # Verified grasp-pose acceptance.
         # MoveIt/Gazebo can report CONTROL_FAILED even when the end-effector has
         # physically reached a valid grasping pose. This function checks the real
         # current pose before allowing the gripper to close.
-        # -------------------------------------------------------------------------
 
         current_pose = self.move_arm.get_current_pose().pose
         current_position = current_pose.position
@@ -431,12 +409,10 @@ class MoveUR5Node(object):
         return acceptable
 
     def is_lift_pose_acceptable(self, lift_pose):
-        # -------------------------------------------------------------------------
-        # BLOCK: Verified lift acceptance.
+        # Verified lift acceptance.
         # Gazebo/MoveIt may report CONTROL_FAILED even when the object has been
         # physically lifted. This function checks the real current end-effector
         # pose and accepts the lift if the gripper is high enough.
-        # -------------------------------------------------------------------------
 
         current_pose = self.move_arm.get_current_pose().pose
         current_position = current_pose.position
@@ -516,11 +492,9 @@ class MoveUR5Node(object):
             return False
 
     def build_runtime_gripper_close_state(self):
-        # -------------------------------------------------------------------------
-        # BLOCK: Runtime gripper close state.
+        # Runtime gripper close state.
         # The current state is used as the base. A small conservative offset is used
         # so that the gripper attempts to close without relying on invalid limits.
-        # -------------------------------------------------------------------------
 
         current_joint_values = self.move_gripper.get_current_joint_values()
         close_joint_values = []
@@ -531,11 +505,9 @@ class MoveUR5Node(object):
         return close_joint_values
 
     def go_to_named_gripper_state(self, candidate_target_names, description):
-        # -------------------------------------------------------------------------
-        # BLOCK: Named gripper target execution.
+        # Named gripper target execution.
         # Some MoveIt configurations define valid named states such as "open" and
         # "close". This function uses them when available.
-        # -------------------------------------------------------------------------
 
         available_named_targets = self.move_gripper.get_named_targets()
         rospy.loginfo("Available gripper named targets: {}".format(available_named_targets))
@@ -557,12 +529,10 @@ class MoveUR5Node(object):
 
 
     def go_to_partial_gripper_close_state(self):
-        # -------------------------------------------------------------------------
-        # BLOCK: Partial gripper closing.
+        # Partial gripper closing.
         # The named target "closed" may close too aggressively and destabilize the
         # red object. This function interpolates between the named "open" and
         # "closed" targets to obtain a softer grasp.
-        # -------------------------------------------------------------------------
 
         available_named_targets = self.move_gripper.get_named_targets()
 
@@ -590,11 +560,9 @@ class MoveUR5Node(object):
         return self.go_to_safe_gripper_state(partial_close_joint_goal, "partial close gripper")
 
     def go_to_safe_gripper_state(self, joint_goal, description):
-        # -------------------------------------------------------------------------
-        # BLOCK: Safe gripper movement wrapper.
+        # Safe gripper movement wrapper.
         # This wrapper prevents the whole node from crashing if the numeric gripper
         # target is rejected by MoveIt.
-        # -------------------------------------------------------------------------
 
         rospy.loginfo("Executing gripper command: {}".format(description))
 
@@ -627,12 +595,10 @@ class MoveUR5Node(object):
         return success and all_close(pose_goal, current_pose, 0.1)
 
     def go_to_pose_cartesian_path(self, pose_goal, description):
-        # -------------------------------------------------------------------------
-        # BLOCK: Direct Cartesian path execution.
+        # Direct Cartesian path execution.
         # This moves the end-effector through a straight Cartesian interpolation
         # from the current pose to the target pose. It avoids unnecessary large
         # rotations caused by unconstrained IK pose planning.
-        # -------------------------------------------------------------------------
 
         rospy.loginfo("Computing Cartesian path for: %s", description)
 
@@ -672,11 +638,9 @@ class MoveUR5Node(object):
         return success and all_close(pose_goal, current_pose, 0.08)
 
     def go_to_pose_with_retries(self, pose_goal, description):
-        # -------------------------------------------------------------------------
-        # BLOCK 8: Robust Cartesian motion execution.
+        # Robust Cartesian motion execution.
         # MoveIt can occasionally fail to plan even for reachable poses, so the same
         # target is attempted several times before declaring failure.
-        # -------------------------------------------------------------------------
 
         for attempt_number in range(1, MAX_GRASP_PLANNING_ATTEMPTS + 1):
             rospy.loginfo(
@@ -701,11 +665,9 @@ class MoveUR5Node(object):
         return False
 
     def build_grasp_pose(self, x_position, y_position, z_position):
-        # -------------------------------------------------------------------------
-        # BLOCK 9: Cartesian pose construction.
+        # Cartesian pose construction.
         # The target position is updated while preserving the saved end-effector
         # orientation from the home configuration.
-        # -------------------------------------------------------------------------
 
         target_pose = geometry_msgs.msg.Pose()
         target_pose.position.x = x_position
@@ -771,11 +733,9 @@ class MoveUR5Node(object):
 
 
     def add_and_attach_object_to_moveit_scene(self):
-        # -------------------------------------------------------------------------
         # Real MoveIt attach.
         # This adds the red prism as a collision object and then attaches it to the
         # end-effector, so RViz shows it as an attached object.
-        # -------------------------------------------------------------------------
 
         self.box_name = "object"
 
@@ -834,11 +794,9 @@ class MoveUR5Node(object):
         return box_attached
 
     def execute_grasp_state_machine(self):
-        # -------------------------------------------------------------------------
         # BLOCK 10: Part 1 grasping state machine.
         # The robot waits for the detected object, opens the gripper, approaches
         # the object, descends, closes the gripper, attaches the object, and lifts it.
-        # -------------------------------------------------------------------------
 
         if self.task_state == "WAIT_FOR_OBJECT":
             if not self.object_detected:

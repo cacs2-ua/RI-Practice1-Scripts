@@ -18,11 +18,8 @@ import numpy as np
 from math import pi, dist, cos, sin, fabs, sqrt, atan2, tan
 
 
-# -------------------------------------------------------------------------
-# BLOCK 1: Vehicle specifications.
 # These values come from the practice template. The Ackermann model uses the
 # maximum steering angle, maximum/minimum speed, and wheelbase length.
-# -------------------------------------------------------------------------
 
 #Vehicle specifications
 MAX_STEER_ANGLE = 24.0*pi/180.0 # Radians
@@ -39,11 +36,8 @@ class BlueTrajectoryPlanner(object):
         ##ROS node initialization
         rospy.init_node("blue_planner_node", anonymous=True)
 
-        # -------------------------------------------------------------------------
-        # BLOCK 2: Planner parameters.
         # These parameters control the local trajectory sampling, obstacle margin,
         # target tolerance, and whether the robot is allowed to reverse.
-        # -------------------------------------------------------------------------
 
         #Parameter initialization
         self.delta_angle = rospy.get_param("~delta_angle", 6.0*pi/180.0)
@@ -115,11 +109,8 @@ class BlueTrajectoryPlanner(object):
         self.obstacle_slowdown_distance = rospy.get_param("~obstacle_slowdown_distance", 3.40)
         self.obstacle_slowdown_half_width = rospy.get_param("~obstacle_slowdown_half_width", 1.20)
 
-        # -------------------------------------------------------------------------
-        # BLOCK 3: Runtime variables.
         # self.position and self.theta represent the current BLUE pose.
         # Obstacles and free-zone limits are received in the local Velodyne frame.
-        # -------------------------------------------------------------------------
 
         #Variable initialization
         self.position = None
@@ -134,12 +125,9 @@ class BlueTrajectoryPlanner(object):
         self.local_path = []
         self.local_target = geometry_msgs.msg.Point()
 
-        # -------------------------------------------------------------------------
-        # BLOCK 4: Target point initialization.
         # The target can be changed from the terminal using _goal_x and _goal_y.
         # The default values are chosen as a reasonable UR5-side target for the
         # current practice scene, but should be tuned if your scene coordinates differ.
-        # -------------------------------------------------------------------------
 
         #TODO Target position initialization. It is possible to consider several target points to maneuver and approach the UR5 robot.
         self.goal = geometry_msgs.msg.Point()
@@ -155,12 +143,9 @@ class BlueTrajectoryPlanner(object):
 
         # TODO consider more subscribers/publishers if needed
 
-        # -------------------------------------------------------------------------
-        # BLOCK 5: Subscribers.
         # Ground truth is kept as a safe fallback. Camera-based localization is also
         # supported using /pose_array, where poses[1] is the BLUE robot pose from
         # object_localization.py.
-        # -------------------------------------------------------------------------
 
         # Subscribers definition
         self.position_subscriber = rospy.Subscriber(
@@ -198,11 +183,8 @@ class BlueTrajectoryPlanner(object):
             queue_size=1
         )
 
-        # -------------------------------------------------------------------------
-        # BLOCK 6: Publishers.
         # /blue/ackermann_cmd controls BLUE. /local_path visualizes the local path.
         # /blue_goal_reached can be used later for Part 3 coordination.
-        # -------------------------------------------------------------------------
 
         ## Publishers definition
         self.ackermann_command_publisher = rospy.Publisher(
@@ -233,12 +215,9 @@ class BlueTrajectoryPlanner(object):
 
     #TODO modify this callback to not depend on the position given by Gazebo.
     def position_callback(self, ground_truth: Odometry):
-        # -------------------------------------------------------------------------
-        # BLOCK 7: Ground-truth localization fallback.
         # This callback is kept to avoid breaking the original practice structure.
         # If camera localization is enabled, this callback is ignored unless fallback
         # is explicitly allowed and no camera pose has arrived yet.
-        # -------------------------------------------------------------------------
 
         if self.use_camera_localization and self.position is not None:
             return
@@ -259,16 +238,12 @@ class BlueTrajectoryPlanner(object):
 
 
     def camera_pose_callback(self, pose_array: geometry_msgs.msg.PoseArray):
-        # -------------------------------------------------------------------------
-        # BLOCK 8: Camera-based BLUE localization.
         # object_localization.py publishes:
         #   poses[0] -> red object
         #   poses[1] -> BLUE robot
         #
         # The camera gives x/y position. The heading theta is approximated from the
         # displacement between the current and previous camera positions.
-        # -------------------------------------------------------------------------
-
         if not self.use_camera_localization:
             return
 
@@ -299,11 +274,9 @@ class BlueTrajectoryPlanner(object):
 
 
     def ur5_ready_callback(self, message: std_msgs.msg.Bool):
-        # -------------------------------------------------------------------------
-        # BLOCK 9: Optional coordination callback.
+        # BOptional coordination callback.
         # For Part 2 alone, wait_for_ur5_signal should be false. For Part 3, the UR5
         # can publish True on /ur5_object_grasped to start BLUE navigation.
-        # -------------------------------------------------------------------------
 
         if message.data:
             self.navigation_enabled = True
@@ -316,13 +289,10 @@ class BlueTrajectoryPlanner(object):
         #Save as geometry_msg.Point
         self.obstacles = []
 
-        # -------------------------------------------------------------------------
-        # BLOCK: Inflated obstacle cloud.
+        # Inflated obstacle cloud.
         # The raw LiDAR cloud may not contain the exact obstacle corner that later
         # hits the wheel/body. Each detected obstacle point is expanded around x/y
         # so that the planner avoids the complete obstacle volume more conservatively.
-        # -------------------------------------------------------------------------
-
         inflation_radius = self.obstacle_point_inflation_radius
 
         inflation_offsets = [
@@ -435,13 +405,11 @@ class BlueTrajectoryPlanner(object):
 
                 #TODO Calculate turn radius and velocity using the robot kinematics.
 
-                # -------------------------------------------------------------------------
-                # BLOCK 10: Bicycle model parameters.
+                # Bicycle model parameters.
                 # For Ackermann steering:
                 #   R = L / tan(delta)
                 #   omega = v / R
                 # Straight motion is treated separately to avoid division by zero.
-                # -------------------------------------------------------------------------
 
                 if abs(steer) < 1e-5:
                     turn_radius = float("inf")
@@ -457,12 +425,10 @@ class BlueTrajectoryPlanner(object):
 
                     #TODO calculate trajectory points using the robot kinematics.
 
-                    # -------------------------------------------------------------------------
-                    # BLOCK 11: Local trajectory point generation.
+                    # Local trajectory point generation.
                     # The trajectory is represented in the BLUE local frame:
                     #   x -> forward
                     #   y -> left
-                    # -------------------------------------------------------------------------
 
                     if abs(steer) < 1e-5:
                         local_point.x = dir * sample
@@ -479,11 +445,9 @@ class BlueTrajectoryPlanner(object):
 
                     #TODO Detect collisions risk.
 
-                    # -------------------------------------------------------------------------
-                    # BLOCK 12: Collision-risk detection.
+                    # Collision-risk detection.
                     # A candidate trajectory is rejected if any sampled point passes too close
                     # to a LiDAR obstacle point.
-                    # -------------------------------------------------------------------------
 
                     for obstacle in self.obstacles:
                         footprint_clearance = self.vehicle_footprint_clearance(
@@ -507,16 +471,13 @@ class BlueTrajectoryPlanner(object):
 
                     #TODO estimate the trajectory evaluation in terms of the distance and orientation error to self.local_target.
 
-                    # -------------------------------------------------------------------------
-                    # BLOCK 13: Trajectory scoring.
+                    # Trajectory scoring.
                     # The score combines:
                     #   1. distance from final trajectory point to the local target,
                     #   2. heading error with respect to the local target,
                     #   3. steering effort,
                     #   4. reverse penalty, only if reverse is enabled.
                     # Lower score means better trajectory.
-                    # -------------------------------------------------------------------------
-
                     target_point = self.local_target
 
                     distance_error = self.distance(final_local_point, target_point)
@@ -661,7 +622,7 @@ class BlueTrajectoryPlanner(object):
 
         self.local_path.append(local_goal)
 
-        # 2) Trajectory points with the inner rings.
+        # Trajectory points with the inner rings.
         # Parameter definition.
         wa2 = 3.0
         wr2 = 1.0
@@ -710,7 +671,7 @@ class BlueTrajectoryPlanner(object):
         else:
             self.local_target = self.global2local(self.goal)
 
-        #Publish the target visualization.
+        # Publish the target visualization.
         self.publish_local_path_markers()
 
 
@@ -724,10 +685,8 @@ class BlueTrajectoryPlanner(object):
 
 
     def normalize_angle(self, angle_value):
-        # -------------------------------------------------------------------------
-        # BLOCK 14: Angle normalization.
+        # Angle normalization.
         # Keeps angles inside [-pi, pi], which makes heading error computation stable.
-        # -------------------------------------------------------------------------
 
         while angle_value > pi:
             angle_value -= 2.0 * pi
@@ -784,8 +743,7 @@ class BlueTrajectoryPlanner(object):
 
 
     def vehicle_footprint_clearance(self, vehicle_pose, vehicle_heading, obstacle_point):
-        # -------------------------------------------------------------------------
-        # BLOCK: Vehicle footprint clearance.
+        # Vehicle footprint clearance.
         # The previous implementation checked only the distance from the trajectory
         # center point to each obstacle. That allowed the centerline to pass while
         # the wheel/body corner collided with obstacle corners.
@@ -793,7 +751,6 @@ class BlueTrajectoryPlanner(object):
         # This function approximates BLUE as a rectangle around each sampled pose.
         # It returns the distance from the obstacle point to the rectangle border.
         # If the obstacle is inside the rectangle, the clearance is zero.
-        # -------------------------------------------------------------------------
 
         dx = obstacle_point.x - vehicle_pose.x
         dy = obstacle_point.y - vehicle_pose.y
@@ -819,10 +776,8 @@ class BlueTrajectoryPlanner(object):
 
 
     def closest_front_obstacle_distance(self):
-        # -------------------------------------------------------------------------
-        # BLOCK: Closest frontal obstacle distance.
+        # Closest frontal obstacle distance.
         # This is used only to reduce speed before a tight avoidance maneuver.
-        # -------------------------------------------------------------------------
 
         closest_distance = float("inf")
 
@@ -837,11 +792,9 @@ class BlueTrajectoryPlanner(object):
 
 
     def limit_speed_when_obstacle_is_close(self, requested_speed):
-        # -------------------------------------------------------------------------
-        # BLOCK: Obstacle-aware speed limiter.
+        # Obstacle-aware speed limiter.
         # Ackermann vehicles need space to turn. When an obstacle is close in front,
         # keeping high speed makes the robot clip the obstacle corner.
-        # -------------------------------------------------------------------------
 
         closest_distance = self.closest_front_obstacle_distance()
 
@@ -855,11 +808,9 @@ class BlueTrajectoryPlanner(object):
 
 
     def compute_side_scores_near_robot(self):
-        # -------------------------------------------------------------------------
-        # BLOCK: Side occupancy analysis.
+        # Side occupancy analysis.
         # Computes how much obstacle evidence exists on the left and right sides
         # near the robot. Positive y is left, negative y is right in the local frame.
-        # -------------------------------------------------------------------------
 
         left_score = 0.0
         right_score = 0.0
@@ -886,12 +837,10 @@ class BlueTrajectoryPlanner(object):
 
 
     def is_obstacle_alongside_after_bypass(self):
-        # -------------------------------------------------------------------------
-        # BLOCK: Bypass exit condition.
+        # Bypass exit condition.
         # If the closest "front" obstacle is extremely close in x but most obstacle
         # evidence is clearly on only one side, the robot is beside the obstacle,
         # not approaching it frontally. In that case the forced bypass must stop.
-        # -------------------------------------------------------------------------
 
         if len(self.obstacles) == 0:
             return False
@@ -926,12 +875,10 @@ class BlueTrajectoryPlanner(object):
 
 
     def compute_bypass_recovery_command(self):
-        # -------------------------------------------------------------------------
-        # BLOCK: Bypass recovery command.
+        # Bypass recovery command.
         # When the obstacle is beside the robot, do not keep maximum steering away
         # from it. Move forward and apply only a mild steering command toward the
         # real goal. This lets BLUE leave the obstacle behind and rejoin the path.
-        # -------------------------------------------------------------------------
 
         if not self.is_obstacle_alongside_after_bypass():
             return None
@@ -951,11 +898,9 @@ class BlueTrajectoryPlanner(object):
 
 
     def compute_explicit_bypass_target(self):
-        # -------------------------------------------------------------------------
-        # BLOCK: Explicit lateral bypass target.
+        # Explicit lateral bypass target.
         # If a frontal obstacle exists, generate a temporary local target clearly
         # to the left or right of the obstacle. This forces an early wide turn.
-        # -------------------------------------------------------------------------
 
         if not self.enable_explicit_bypass_target:
             return None
@@ -1020,10 +965,8 @@ class BlueTrajectoryPlanner(object):
 
 
     def publish_local_path_markers(self):
-        # -------------------------------------------------------------------------
-        # BLOCK: Local path marker publisher.
+        # Local path marker publisher.
         # Visualizes the selected local target / bypass target in RViz.
-        # -------------------------------------------------------------------------
 
         marker_msg = MarkerArray()
 
@@ -1049,12 +992,10 @@ class BlueTrajectoryPlanner(object):
 
 
     def compute_emergency_avoidance_command(self):
-        # -------------------------------------------------------------------------
-        # BLOCK: Emergency obstacle avoidance.
+        # Emergency obstacle avoidance.
         # If every sampled trajectory is rejected, the robot chooses the side with
         # fewer/less dangerous obstacle points and performs a controlled curved
         # forward maneuver instead of stopping forever.
-        # -------------------------------------------------------------------------
 
         if len(self.obstacles) == 0:
             return 0.0, 0.0

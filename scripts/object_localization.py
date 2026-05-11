@@ -15,11 +15,9 @@ from geometry_msgs.msg import PoseArray, Pose
 from math import sqrt, pow
 
 
-# -------------------------------------------------------------------------
-# BLOCK 1: Global variables.
+# Global variables.
 # This block stores the publishers, centroids, depth values, and detection flags
 # shared by the RGB, depth, and camera-info callbacks.
-# -------------------------------------------------------------------------
 
 # Define global variables (publishers and flags)
 filtered_obj_pub = None
@@ -41,12 +39,10 @@ def filter_img_objects(color_image, lower, upper):
     # This function ouputs the filtered image, the object centroid in image coordinates, and a flag
     # indicating if an object was detected or not.
 
-    # -------------------------------------------------------------------------
-    # BLOCK: HSV color filtering without deleting small objects.
+    # HSV color filtering without deleting small objects.
     # The red object is very small in the overhead camera image. Therefore, this
     # implementation avoids aggressive morphological opening operations that can
     # completely remove the red cube from the binary mask.
-    # -------------------------------------------------------------------------
 
     # Convert the RGB image to HSV channel for the filtering
     hsv_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2HSV)
@@ -80,11 +76,9 @@ def filter_img_objects(color_image, lower, upper):
     # Obtain the contour with the biggest area (cv2.contourArea) given the contours of the filtered object.
     # Obtaing the object centroid (px,py) using the image moments (cv2.moments)
 
-    # -------------------------------------------------------------------------
-    # BLOCK: Centroid from the largest contour.
+    # Centroid from the largest contour.
     # A very small minimum area is used because the red object occupies few pixels
     # in the top-view camera image.
-    # -------------------------------------------------------------------------
 
     if contours:
 
@@ -127,11 +121,9 @@ def img_xyz(centroid, depth, camera_matrix):
     # This function transforms a pixel (centroid) from a depth image to a XYZ coordinate using the intrinsic parameters of the camera (camera_matrix).
     # This function outputs the x,y,z of the detected object.
 
-    # -------------------------------------------------------------------------
-    # BLOCK 4: Intrinsic camera parameter extraction.
+    # Intrinsic camera parameter extraction.
     # The camera matrix K is stored as:
     # [fx, 0, cx, 0, fy, cy, 0, 0, 1]
-    # -------------------------------------------------------------------------
 
     # TODO
     # Extract the intrinsic parameters of the camera_matrix variable given the following order:
@@ -167,19 +159,15 @@ def color_image_callback(color_image_msg):
     # Definition of global variables
     global filtered_obj_pub, filtered_blue_pub, centroide_obj, centroide_blue, obt_detec, robot_detec
 
-    # -------------------------------------------------------------------------
-    # BLOCK 5: RGB image conversion.
+    # RGB image conversion.
     # The ROS Image message is converted into an OpenCV BGR image.
-    # -------------------------------------------------------------------------
 
     # Convert the image message from ROS type to OpenCV
     bridge = CvBridge()
     color_image = bridge.imgmsg_to_cv2(color_image_msg, desired_encoding="bgr8")
 
-    # -------------------------------------------------------------------------
-    # BLOCK 6: BLUE robot color segmentation.
+    # BLUE robot color segmentation.
     # This keeps the original HSV range from the base code.
-    # -------------------------------------------------------------------------
 
     # Filter robot Blue
     lower_blue = np.array([100, 100, 100])
@@ -194,10 +182,8 @@ def color_image_callback(color_image_msg):
     # Filter the red color objects corresponding to the objects to manipulate in the scene,
     # based on the previous example of blue color filtering.
 
-    # -------------------------------------------------------------------------
-    # BLOCK 7: Red object color segmentation.
+    # Red object color segmentation.
     # Red is split into two HSV intervals because red hue wraps around the HSV axis.
-    # -------------------------------------------------------------------------
 
     # Filter red color object (HSV limits)
     # The simulated red cube is very small and may appear dark due to Gazebo lighting.
@@ -220,11 +206,9 @@ def color_image_callback(color_image_msg):
 
 def get_depth_value_in_meters(depth_image, centroid):
 
-    # -------------------------------------------------------------------------
-    # BLOCK 8: Robust depth extraction.
+    # Robust depth extraction.
     # A small window around the centroid is used. If the value is in millimetres,
     # it is converted to metres.
-    # -------------------------------------------------------------------------
 
     if centroid is None:
         return None
@@ -267,10 +251,8 @@ def depth_image_callback(depth_image_msg):
     # Definition of global variables
     global centroide_obj, centroide_blue, depth_obj, depth_blue, obt_detec, robot_detec
 
-    # -------------------------------------------------------------------------
-    # BLOCK 9: Depth image conversion.
+    # Depth image conversion.
     # The depth image is read using passthrough encoding to preserve its original type.
-    # -------------------------------------------------------------------------
 
     # Transform the depth image message to a OpenCV image
     bridge = CvBridge()
@@ -283,9 +265,7 @@ def depth_image_callback(depth_image_msg):
     # Obtain the camera-object distance (depth) of the object and robot in the scene, given the previous description.
     # Note: The depth image data must be converted from millimeters to meters.
 
-    # -------------------------------------------------------------------------
-    # BLOCK 10: Depth computation for the object and BLUE robot.
-    # -------------------------------------------------------------------------
+    # Depth computation for the object and BLUE robot.
 
     if obt_detec:
         depth_obj = get_depth_value_in_meters(depth_image, centroide_obj)
@@ -304,10 +284,8 @@ def camera_info_callback(camera_info_msg):
     # Definition of global variables
     global centroide_obj, centroide_blue, depth_obj, depth_blue, pose_array_pub, obt_detec, robot_detec
 
-    # -------------------------------------------------------------------------
-    # BLOCK 11: XYZ localization and PoseArray publication.
+    # XYZ localization and PoseArray publication.
     # z = -1 means that the object or robot has not been detected correctly.
-    # -------------------------------------------------------------------------
 
     # Obtain the object localization
     # Initialize xyz variables of each object.
@@ -373,10 +351,8 @@ def ros_node():
     # subscribe to the "/camera/color/image_raw" topic to obtaing the RGB image.
     # The subscribers to obtain the depth image and the intrinsic parameters of the camera must be implemented.
 
-    # -------------------------------------------------------------------------
-    # BLOCK 12: Publishers.
+    # Publishers.
     # Publishers are created before subscribers to avoid callback race conditions.
-    # -------------------------------------------------------------------------
 
     # global variables
     global filtered_obj_pub, filtered_blue_pub, pose_array_pub
@@ -386,10 +362,8 @@ def ros_node():
     filtered_blue_pub = rospy.Publisher('/filtered_image/robot', Image, queue_size=1)
     pose_array_pub = rospy.Publisher('/pose_array', PoseArray, queue_size=10)
 
-    # -------------------------------------------------------------------------
-    # BLOCK 13: Subscribers.
+    # Subscribers.
     # The default topics correspond to the simulated Realsense camera.
-    # -------------------------------------------------------------------------
 
     color_image_topic = rospy.get_param("~color_image_topic", "/camera/color/image_raw")
     depth_image_topic = rospy.get_param("~depth_image_topic", "/camera/depth/image_raw")
