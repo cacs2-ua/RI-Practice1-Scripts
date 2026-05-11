@@ -1,6 +1,7 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
-# ROS node to calculate the trajectory towards the target while avoiding obstacles.
+# Intelligent Robotics - Master's Degree in Artificial Intelligence - University of Alicante
+# ROS node for robot BLUE navigation.
 
 import sys
 import copy
@@ -16,11 +17,19 @@ import tf_conversions
 import numpy as np
 from math import pi, dist, cos, sin, fabs, sqrt, atan2, tan
 
+
+# -------------------------------------------------------------------------
+# BLOCK 1: Vehicle specifications.
+# These values come from the practice template. The Ackermann model uses the
+# maximum steering angle, maximum/minimum speed, and wheelbase length.
+# -------------------------------------------------------------------------
+
 #Vehicle specifications
 MAX_STEER_ANGLE = 24.0*pi/180.0 # Radians
 MAX_SPEED = 1.3    # m/s
 MIN_SPEED = 0.6
-VEHICLE_LENGHT = 1.05 
+VEHICLE_LENGHT = 1.05
+
 
 class BlueTrajectoryPlanner(object):
 
@@ -30,39 +39,120 @@ class BlueTrajectoryPlanner(object):
         ##ROS node initialization
         rospy.init_node("blue_planner_node", anonymous=True)
 
+        # -------------------------------------------------------------------------
+        # BLOCK 2: Planner parameters.
+        # These parameters control the local trajectory sampling, obstacle margin,
+        # target tolerance, and whether the robot is allowed to reverse.
+        # -------------------------------------------------------------------------
+
         #Parameter initialization
-        self.delta_angle=6.0*pi/180.0
-        self.delta_sample=0.2
-        self.max_sample=1.0
-        self.reached_distance=1.5
-        self.slow_down_distance=2.0
-        self.rate=5
+        self.delta_angle = rospy.get_param("~delta_angle", 6.0*pi/180.0)
+        self.delta_sample = rospy.get_param("~delta_sample", 0.20)
+        self.max_sample = rospy.get_param("~max_sample", 2.00)
+        self.reached_distance = rospy.get_param("~reached_distance", 1.00)
+        self.slow_down_distance = rospy.get_param("~slow_down_distance", 2.00)
+        self.rate = rospy.get_param("~rate", 5)
 
         #TODO Define other parameters needed for the planner.
+        self.collision_margin = rospy.get_param("~collision_margin", 0.55)
+        self.trajectory_distance_weight = rospy.get_param("~trajectory_distance_weight", 1.00)
+        self.trajectory_heading_weight = rospy.get_param("~trajectory_heading_weight", 0.70)
+        self.trajectory_steering_weight = rospy.get_param("~trajectory_steering_weight", 0.10)
+        self.reverse_motion_penalty = rospy.get_param("~reverse_motion_penalty", 2.00)
+        self.allow_reverse = rospy.get_param("~allow_reverse", False)
+        self.use_camera_localization = rospy.get_param("~use_camera_localization", False)
+        self.use_ground_truth_fallback = rospy.get_param("~use_ground_truth_fallback", True)
+        self.wait_for_ur5_signal = rospy.get_param("~wait_for_ur5_signal", False)
+        self.minimum_camera_motion_for_heading = rospy.get_param("~minimum_camera_motion_for_heading", 0.05)
+
+        # -------------------------------------------------------------------------
+        # BLOCK 3: Runtime variables.
+        # self.position and self.theta represent the current BLUE pose.
+        # Obstacles and free-zone limits are received in the local Velodyne frame.
+        # -------------------------------------------------------------------------
 
         #Variable initialization
         self.position = None
-        self.theta = 0 
+        self.theta = 0
         self.obstacles = []
         self.limits = None
         self.goal_reached = False #Wait until UR5 tells us to approach.
+
         #TODO Define other necessary variables.
+        self.navigation_enabled = not self.wait_for_ur5_signal
+        self.previous_camera_position = None
+        self.local_path = []
+        self.local_target = geometry_msgs.msg.Point()
+
+        # -------------------------------------------------------------------------
+        # BLOCK 4: Target point initialization.
+        # The target can be changed from the terminal using _goal_x and _goal_y.
+        # The default values are chosen as a reasonable UR5-side target for the
+        # current practice scene, but should be tuned if your scene coordinates differ.
+        # -------------------------------------------------------------------------
 
         #TODO Target position initialization. It is possible to consider several target points to maneuver and approach the UR5 robot.
         self.goal = geometry_msgs.msg.Point()
-        self.goal.x, self.goal.y = 0.0, 0.0
-        # Local path initialization (4 points) to avoid errors until the first point is calculated.
-        self.local_path=[self.goal for i in range(4)]
+        self.goal.x = rospy.get_param("~goal_x", 6.60)
+        self.goal.y = rospy.get_param("~goal_y", -6.03)
+        self.goal.z = 0.0
+
+        # Local target initialization to avoid errors until the first point is calculated.
+        self.local_target = self.goal
+        self.local_path = [self.goal for _ in range(4)]
+
         print("Goal x: {}, y: {}".format(self.goal.x, self.goal.y))
 
         # TODO consider more subscribers/publishers if needed
+
+        # -------------------------------------------------------------------------
+        # BLOCK 5: Subscribers.
+        # Ground truth is kept as a safe fallback. Camera-based localization is also
+        # supported using /pose_array, where poses[1] is the BLUE robot pose from
+        # object_localization.py.
+        # -------------------------------------------------------------------------
+
         # Subscribers definition
-        self.position_subscriber = rospy.Subscriber("/blue/ground_truth",
-            Odometry, self.position_callback, queue_size=1)
-        self.obstacles_subscriber = rospy.Subscriber("/obstacles",
-            sensor_msgs.msg.PointCloud2, self.obstacles_callback, queue_size=1)
-        self.obstacles_subscriber = rospy.Subscriber("/free_zone",
-            sensor_msgs.msg.PointCloud2, self.limits_callback, queue_size=1)
+        self.position_subscriber = rospy.Subscriber(
+            "/blue/ground_truth",
+            Odometry,
+            self.position_callback,
+            queue_size=1
+        )
+
+        self.camera_position_subscriber = rospy.Subscriber(
+            "/pose_array",
+            geometry_msgs.msg.PoseArray,
+            self.camera_pose_callback,
+            queue_size=1
+        )
+
+        self.obstacles_subscriber = rospy.Subscriber(
+            "/obstacles",
+            sensor_msgs.msg.PointCloud2,
+            self.obstacles_callback,
+            queue_size=1
+        )
+
+        self.limits_subscriber = rospy.Subscriber(
+            "/free_zone",
+            sensor_msgs.msg.PointCloud2,
+            self.limits_callback,
+            queue_size=1
+        )
+
+        self.ur5_ready_subscriber = rospy.Subscriber(
+            "/ur5_object_grasped",
+            std_msgs.msg.Bool,
+            self.ur5_ready_callback,
+            queue_size=1
+        )
+
+        # -------------------------------------------------------------------------
+        # BLOCK 6: Publishers.
+        # /blue/ackermann_cmd controls BLUE. /local_path visualizes the local path.
+        # /blue_goal_reached can be used later for Part 3 coordination.
+        # -------------------------------------------------------------------------
 
         ## Publishers definition
         self.ackermann_command_publisher = rospy.Publisher(
@@ -77,40 +167,306 @@ class BlueTrajectoryPlanner(object):
             queue_size=10,
         )
 
-        
-    #Callbacks
-    #TODO modify this callback to not depend on the position given by Gazebo.
-    def position_callback(self, ground_truth:Odometry):
-        self.position=ground_truth.pose.pose.position
-        euler = tf_conversions.transformations.euler_from_quaternion(ground_truth.pose.pose.orientation)
-        self.theta=euler[2]
+        self.goal_reached_publisher = rospy.Publisher(
+            "/blue_goal_reached",
+            std_msgs.msg.Bool,
+            queue_size=10,
+        )
 
-    def obstacles_callback(self, obstacles:sensor_msgs.msg.PointCloud2):
-        pc_obstacles=pc2.read_points(obstacles, field_names=("x", "y", "z"), skip_nans=True)
+        rospy.loginfo("BLUE navigation enabled: %s", str(self.navigation_enabled))
+        rospy.loginfo("Using camera localization: %s", str(self.use_camera_localization))
+        rospy.loginfo("Using ground truth fallback: %s", str(self.use_ground_truth_fallback))
+        rospy.loginfo("Collision margin: %.3f m", self.collision_margin)
+
+
+    #Callbacks
+
+    #TODO modify this callback to not depend on the position given by Gazebo.
+    def position_callback(self, ground_truth: Odometry):
+        # -------------------------------------------------------------------------
+        # BLOCK 7: Ground-truth localization fallback.
+        # This callback is kept to avoid breaking the original practice structure.
+        # If camera localization is enabled, this callback is ignored unless fallback
+        # is explicitly allowed and no camera pose has arrived yet.
+        # -------------------------------------------------------------------------
+
+        if self.use_camera_localization and self.position is not None:
+            return
+
+        if self.use_camera_localization and not self.use_ground_truth_fallback:
+            return
+
+        self.position = ground_truth.pose.pose.position
+        euler = tf_conversions.transformations.euler_from_quaternion(
+            [
+                ground_truth.pose.pose.orientation.x,
+                ground_truth.pose.pose.orientation.y,
+                ground_truth.pose.pose.orientation.z,
+                ground_truth.pose.pose.orientation.w
+            ]
+        )
+        self.theta = euler[2]
+
+
+    def camera_pose_callback(self, pose_array: geometry_msgs.msg.PoseArray):
+        # -------------------------------------------------------------------------
+        # BLOCK 8: Camera-based BLUE localization.
+        # object_localization.py publishes:
+        #   poses[0] -> red object
+        #   poses[1] -> BLUE robot
+        #
+        # The camera gives x/y position. The heading theta is approximated from the
+        # displacement between the current and previous camera positions.
+        # -------------------------------------------------------------------------
+
+        if not self.use_camera_localization:
+            return
+
+        if len(pose_array.poses) < 2:
+            return
+
+        camera_blue_position = pose_array.poses[1].position
+
+        if camera_blue_position.z < 0.0:
+            return
+
+        new_position = geometry_msgs.msg.Point()
+        new_position.x = camera_blue_position.x
+        new_position.y = camera_blue_position.y
+        new_position.z = 0.0
+
+        if self.previous_camera_position is not None:
+            displacement = self.distance(new_position, self.previous_camera_position)
+
+            if displacement >= self.minimum_camera_motion_for_heading:
+                self.theta = atan2(
+                    new_position.y - self.previous_camera_position.y,
+                    new_position.x - self.previous_camera_position.x
+                )
+
+        self.position = new_position
+        self.previous_camera_position = copy.deepcopy(new_position)
+
+
+    def ur5_ready_callback(self, message: std_msgs.msg.Bool):
+        # -------------------------------------------------------------------------
+        # BLOCK 9: Optional coordination callback.
+        # For Part 2 alone, wait_for_ur5_signal should be false. For Part 3, the UR5
+        # can publish True on /ur5_object_grasped to start BLUE navigation.
+        # -------------------------------------------------------------------------
+
+        if message.data:
+            self.navigation_enabled = True
+            rospy.loginfo("Received UR5 ready signal. BLUE navigation enabled.")
+
+
+    def obstacles_callback(self, obstacles: sensor_msgs.msg.PointCloud2):
+        pc_obstacles = pc2.read_points(obstacles, field_names=("x", "y", "z"), skip_nans=True)
+
         #Save as geometry_msg.Point
-        self.obstacles=[]
+        self.obstacles = []
+
         for point in pc_obstacles:
-            x,y,z = point
-            new_point = geometry_msgs.msg.Point(x,y,z)
+            x, y, z = point
+            new_point = geometry_msgs.msg.Point(x, y, z)
             self.obstacles.append(new_point)
 
-    def limits_callback(self, limits:sensor_msgs.msg.PointCloud2):
-        pc_limits=pc2.read_points(limits, field_names=("x", "y", "z"), skip_nans=True)
+
+    def limits_callback(self, limits: sensor_msgs.msg.PointCloud2):
+        pc_limits = pc2.read_points(limits, field_names=("x", "y", "z"), skip_nans=True)
+
         #Save as geometry_msg.Point
-        self.limits=[]
+        self.limits = []
 
         #Decrease the size of the point cloud to speed up the search.
-        num_points = max(int(limits.width/18),0)
-        count=0
+        num_points = max(int(limits.width / 18), 0)
+        count = 0
+
         for point in pc_limits:
-            if count==0:
-                x,y,z = point
-                new_point = geometry_msgs.msg.Point(x,y,z)
+            if count == 0:
+                x, y, z = point
+                new_point = geometry_msgs.msg.Point(x, y, z)
                 self.limits.append(new_point)
-                count=num_points
-            else: count-=1
+                count = num_points
+            else:
+                count -= 1
 
 
+    # Calculate the control commands to reach the planned local target.
+    def controlActionCalculation(self):
+        # Detect if the trajectory is finished.
+        if self.position is None or self.goal_reached:
+            return
+
+        ackermann_control = ackermann_msgs.msg.AckermannDrive()
+        ackermann_control.speed, ackermann_control.steering_angle = 0.0, 0.0
+
+        if not self.navigation_enabled:
+            self.ackermann_command_publisher.publish(ackermann_control)
+            return
+
+        # Detect if the robot has reached the following target point.
+        if self.distance(self.position, self.goal) < self.reached_distance:
+            print("Goal reached")
+            self.goal_reached = True
+            self.ackermann_command_publisher.publish(ackermann_control)
+            self.goal_reached_publisher.publish(std_msgs.msg.Bool(data=True))
+            return
+
+        # Reduce the veolicty when the robot is reaching the target.
+        goal_distance = self.distance(self.position, self.goal)
+
+        if goal_distance - self.reached_distance < self.slow_down_distance:
+            speed = MIN_SPEED
+
+            #Set the target as local target.
+            self.local_target = self.global2local(self.goal)
+        else:
+            speed = MAX_SPEED
+
+            if self.local_target is None:
+                self.local_target = self.global2local(self.goal)
+
+        #Variable initialization
+        min_error = float("inf")
+        selected_command_found = False
+
+        # Check possible action control commands
+        for steer in np.arange(-MAX_STEER_ANGLE, MAX_STEER_ANGLE + 0.01, self.delta_angle):
+            if abs(steer) < 0.01:
+                steer = 0.0
+
+            #Reduce the velocity when the turn is big.
+            k_sp = (MAX_STEER_ANGLE - abs(steer)) / MAX_STEER_ANGLE
+            speed2 = max(speed * k_sp, MIN_SPEED)
+
+            # Check forwards and backwards movement.
+            if self.allow_reverse:
+                directions = [-speed2, speed2]
+            else:
+                directions = [speed2]
+
+            for dir in directions:
+                flag_collision_risk = False
+                final_local_point = geometry_msgs.msg.Point()
+                final_heading = 0.0
+
+                #TODO Calculate turn radius and velocity using the robot kinematics.
+
+                # -------------------------------------------------------------------------
+                # BLOCK 10: Bicycle model parameters.
+                # For Ackermann steering:
+                #   R = L / tan(delta)
+                #   omega = v / R
+                # Straight motion is treated separately to avoid division by zero.
+                # -------------------------------------------------------------------------
+
+                if abs(steer) < 1e-5:
+                    turn_radius = float("inf")
+                    angular_velocity = 0.0
+                else:
+                    turn_radius = VEHICLE_LENGHT / tan(steer)
+                    angular_velocity = dir / turn_radius
+
+                # Calculate the trajectory using the angle rotation. Several points are sampled from the trajectory over time,
+                # therefore the sample variable is equivalent to the t variable in the robot kinematic equation.
+                for sample in np.arange(self.delta_sample, self.max_sample + 0.01, self.delta_sample):
+                    local_point = geometry_msgs.msg.Point()
+
+                    #TODO calculate trajectory points using the robot kinematics.
+
+                    # -------------------------------------------------------------------------
+                    # BLOCK 11: Local trajectory point generation.
+                    # The trajectory is represented in the BLUE local frame:
+                    #   x -> forward
+                    #   y -> left
+                    # -------------------------------------------------------------------------
+
+                    if abs(steer) < 1e-5:
+                        local_point.x = dir * sample
+                        local_point.y = 0.0
+                        final_heading = 0.0
+                    else:
+                        yaw = angular_velocity * sample
+                        local_point.x = turn_radius * sin(yaw)
+                        local_point.y = turn_radius * (1.0 - cos(yaw))
+                        final_heading = yaw
+
+                    final_local_point = local_point
+
+                    #TODO Detect collisions risk.
+
+                    # -------------------------------------------------------------------------
+                    # BLOCK 12: Collision-risk detection.
+                    # A candidate trajectory is rejected if any sampled point passes too close
+                    # to a LiDAR obstacle point.
+                    # -------------------------------------------------------------------------
+
+                    for obstacle in self.obstacles:
+                        if self.distance(local_point, obstacle) < self.collision_margin:
+                            flag_collision_risk = True
+                            break
+
+                    if flag_collision_risk:
+                        break
+
+                # If there is no collision, evaluate the trajectory.
+                if not flag_collision_risk:
+
+                    #TODO estimate the trajectory evaluation in terms of the distance and orientation error to self.local_target.
+
+                    # -------------------------------------------------------------------------
+                    # BLOCK 13: Trajectory scoring.
+                    # The score combines:
+                    #   1. distance from final trajectory point to the local target,
+                    #   2. heading error with respect to the local target,
+                    #   3. steering effort,
+                    #   4. reverse penalty, only if reverse is enabled.
+                    # Lower score means better trajectory.
+                    # -------------------------------------------------------------------------
+
+                    target_point = self.local_target
+
+                    distance_error = self.distance(final_local_point, target_point)
+
+                    desired_heading = atan2(
+                        target_point.y - final_local_point.y,
+                        target_point.x - final_local_point.x
+                    )
+
+                    heading_error = abs(self.normalize_angle(desired_heading - final_heading))
+                    steering_error = abs(steer) / MAX_STEER_ANGLE
+
+                    reverse_penalty = 0.0
+                    if dir < 0.0:
+                        reverse_penalty = self.reverse_motion_penalty
+
+                    error = (
+                        self.trajectory_distance_weight * distance_error +
+                        self.trajectory_heading_weight * heading_error +
+                        self.trajectory_steering_weight * steering_error +
+                        reverse_penalty
+                    )
+
+                    if error < min_error:
+                        min_error = error
+                        selected_command_found = True
+                        ackermann_control.steering_angle = steer
+                        ackermann_control.speed = dir
+
+        if not selected_command_found:
+            rospy.logwarn_throttle(
+                1.0,
+                "No collision-free local trajectory found. Stopping BLUE."
+            )
+            ackermann_control.speed = 0.0
+            ackermann_control.steering_angle = 0.0
+
+        #Publish message
+        self.ackermann_command_publisher.publish(ackermann_control)
+
+
+    #### Don't edit this function! ####
     # Trajectory planning towards the target while avoiding obstacles. It is executed at a lower frequency.
     ''' Code implemented from the following research article:
             OpenStreetMap-Based Autonomous Navigation With LiDAR Naive-Valley-Path Obstacle Avoidance
@@ -118,37 +474,55 @@ class BlueTrajectoryPlanner(object):
             IEEE Transactions on Intelligent Transportation Systems, 2022
     '''
     def localGoalCalculation(self):
-        if self.position is  None or self.goal_reached or self.limits is None: return
+        if self.position is None or self.goal_reached:
+            return
+
+        if not self.navigation_enabled:
+            return
+
+        # If the obstacle detector has not published the free-zone ring yet, use
+        # the real goal directly in the robot local frame.
+        if self.limits is None or len(self.limits) == 0:
+            self.local_target = self.global2local(self.goal)
+            return
+
         #Parameter definition
         wa, wr, ar, aa = 100.0, 1.0, 0.8, 0.3
         min_force = wr / pow(0.1, ar) - wa / pow(100.0, aa) + 1000
 
-        local_goal=geometry_msgs.msg.Point()
-        self.local_path=[]
-        min_distance = 10000.0
+        local_goal = geometry_msgs.msg.Point()
+        self.local_path = []
         goal_in_local_axis = self.global2local(self.goal)
+
         # 1) Trajectory points within the limited radius.
         for limit_point in self.limits:
             distance_a = self.distance(limit_point, goal_in_local_axis)
-            if distance_a<0.0: distance_a=0.1
+            if distance_a < 0.1:
+                distance_a = 0.1
 
-            force_a = wa / pow(distance_a,aa)
+            force_a = wa / pow(distance_a, aa)
 
             #Computation of the minimum obstacle distance and its weight.
-            min_distance=10000.0
+            min_distance = 10000.0
+            force_r = 0.0
+
             for obstacle_point in self.obstacles:
-                distance_r = self.distance(limit_point,obstacle_point)
-                if distance_r<0.1: distance_r=0.1
-                if distance_r<min_distance:
-                    min_distance=distance_r
+                distance_r = self.distance(limit_point, obstacle_point)
+                if distance_r < 0.1:
+                    distance_r = 0.1
+
+                if distance_r < min_distance:
+                    min_distance = distance_r
                     force_r = wr / pow(distance_r, ar)
 
             force = force_r - force_a
 
             if force < min_force:
-                min_force=force
-                local_goal=limit_point
+                min_force = force
+                local_goal = limit_point
+
         self.local_path.append(local_goal)
+
         # 2) Trajectory points with the inner rings.
         # Parameter definition.
         wa2 = 3.0
@@ -158,34 +532,49 @@ class BlueTrajectoryPlanner(object):
         radious = 4.0
         delta_rad = radious / 3.0
 
-        for rad in np.arange(radious, delta_rad-0.1, -delta_rad):
+        for rad in np.arange(radious, delta_rad - 0.1, -delta_rad):
             min_force = wr / pow(0.1, ar) - wa / pow(100.0, aa) + 1000
-            #Computation of the minimum obstacle distance and its weight.
-            min_distance = 10000.0
-            for limit_point in self.limits:
-                depth, azimuth=self.cartesian2Spherical(limit_point.x, limit_point.y)
-                p_in  = self. spherical2Cartesian(rad, azimuth)
+            local_goal = self.global2local(self.goal)
 
-                distance_a=self.distance(p_in, self.local_path[0])
-                if distance_a<0.0: distance_a=0.1
-                force_a = wa2 /pow(distance_a,aa2)
+            #Computation of the minimum obstacle distance and its weight.
+            for limit_point in self.limits:
+                depth, azimuth = self.cartesian2Spherical(limit_point.x, limit_point.y)
+                p_in = self.spherical2Cartesian(rad, azimuth)
+
+                distance_a = self.distance(p_in, self.local_path[0])
+                if distance_a < 0.1:
+                    distance_a = 0.1
+
+                force_a = wa2 / pow(distance_a, aa2)
 
                 min_distance = 10000.0
+                force_r = 0.0
+
                 for obstacle_point in self.obstacles:
                     distance_r = self.distance(p_in, obstacle_point)
-                    if distance_r<0.1: distance_r=0.1
-                    if distance_r<min_distance:
-                        min_distance=distance_r
+                    if distance_r < 0.1:
+                        distance_r = 0.1
+
+                    if distance_r < min_distance:
+                        min_distance = distance_r
                         force_r = wr2 / pow(distance_r, ar2)
 
-                force = force_r-force_a
+                force = force_r - force_a
+
                 if force < min_force:
-                    min_force=force
-                    local_goal=p_in
+                    min_force = force
+                    local_goal = p_in
+
             self.local_path.append(local_goal)
+
+        if len(self.local_path) >= 2:
+            self.local_target = self.local_path[-2]
+        else:
+            self.local_target = self.global2local(self.goal)
 
         #Publish the target visualization.
         marker_msg = MarkerArray()
+
         for id, point in enumerate(self.local_path):
             marker = Marker()
             marker.header.frame_id = "blue/velodyne"
@@ -203,131 +592,101 @@ class BlueTrajectoryPlanner(object):
             marker.color.g = 0.0
             marker.color.b = 1.0
             marker_msg.markers.append(marker)
+
         self.marker_publisher.publish(marker_msg)
 
-    # Calculate the control commands to reach the planned local target.
-    def controlActionCalculation(self):
-        # Detect if the trajectory is finished.
-        if self.position is None or self.goal_reached:
-            return
-        
-        ackermann_control=ackermann_msgs.msg.AckermannDrive()
-        ackermann_control.speed, ackermann_control.steering_angle = 0.0, 0.0
-        # Detect if the robot has reached the following target point.
-        if self.distance(self.position, self.goal) < self.reached_distance:
-            print("Goal reached")
-            self.goal_reached=True
-            self.ackermann_command_publisher.publish(ackermann_control)
-            return
-        
-        # Reduce the veolicty when the robot is reaching the target.
-        goal_distance = self.distance(self.position, self.goal) 
-        if goal_distance- self.reached_distance < self.slow_down_distance:
-            speed = MIN_SPEED
-            #Set the target as local target.
-            self.local_path[-2]=self.global2local(self.goal)
-        else:
-            self.margin=1.0
-            speed=MAX_SPEED
 
-        #Variable initialization
-        min_error = 1000
+    def distance(self, p1: geometry_msgs.msg.Point, p2: geometry_msgs.msg.Point):
+        return sqrt((p1.x - p2.x)**2 + (p1.y - p2.y)**2)
 
-        # Check possible action control commands
-        for steer in np.arange(-MAX_STEER_ANGLE, MAX_STEER_ANGLE+0.01, self.delta_angle):
-            if abs(steer)<0.01: steer=0.0
-            #Reduce the velocity when the turn is big.
-            k_sp = (MAX_STEER_ANGLE-abs(steer))/MAX_STEER_ANGLE
-            speed2 = max(speed*k_sp, MIN_SPEED)
 
-            # Check forwards and backwards movement.
-            directions = [-speed2, speed2]
-            for dir in directions:
-                flag_collision_risk = False
-
-                #TODO Calculate turn radius and velocity using the robot kinematics.
-
-                # Calculate the trajectory using the angle rotation. Several points are sampled from the trajectory over time, 
-                # therefore the sample variable is equivalent to the t variable in the robot kinematic equation.
-                for sample in np.arange(self.delta_sample, self.max_sample+0.01, self.delta_sample):
-                    local_point=geometry_msgs.msg.Point()
-                    #TODO calculate trajectory points using the robot kinematics.
-                
-                    #TODO Detect collisions risk.
-                    for obstacle in self.obstacles:
-                        pass
-                    
-                    if flag_collision_risk: break
- 
-                # If there is no collision, evaluate the trajectory.
-                if not flag_collision_risk:
-                    #TODO estimate the trajectory evaluation in terms of the distance and orientation error to the local target (self.local_path[-2]).
-                    error = 0
-                    if error < min_error:
-                        min_error=error
-                        ackermann_control.steering_angle=steer
-                        ackermann_control.speed=dir
-        
-        #Publish message
-        self.ackermann_command_publisher.publish(ackermann_control)
-    
-    
-    def distance(self, p1:geometry_msgs.msg.Point, p2:geometry_msgs.msg.Point):
-        return sqrt((p1.x-p2.x)**2+(p1.y-p2.y)**2)
-    
     # Angle from point p2 to p1
-    def angle(self, p1:geometry_msgs.msg.Point, p2:geometry_msgs.msg.Point):
-        return atan2((p1.y-p2.y),p1.x-p2.x)
-    
+    def angle(self, p1: geometry_msgs.msg.Point, p2: geometry_msgs.msg.Point):
+        return atan2((p1.y - p2.y), p1.x - p2.x)
+
+
+    def normalize_angle(self, angle_value):
+        # -------------------------------------------------------------------------
+        # BLOCK 14: Angle normalization.
+        # Keeps angles inside [-pi, pi], which makes heading error computation stable.
+        # -------------------------------------------------------------------------
+
+        while angle_value > pi:
+            angle_value -= 2.0 * pi
+
+        while angle_value < -pi:
+            angle_value += 2.0 * pi
+
+        return angle_value
+
+
     #Transformation from global to local position
-    def global2local(self, p:geometry_msgs.msg.Point):
+    def global2local(self, p: geometry_msgs.msg.Point):
         result = geometry_msgs.msg.Point()
+
+        if self.position is None:
+            return result
+
         #Translation
-        x = (p.x-self.position.x) 
-        y = (p.y-self.position.y)
+        x = (p.x - self.position.x)
+        y = (p.y - self.position.y)
+
         #Rotation
         result.x = x * cos(-self.theta) - y * sin(-self.theta)
         result.y = x * sin(-self.theta) + y * cos(-self.theta)
+
         return result
-    
+
+
     #From spherical to cartesian coordinates
     def spherical2Cartesian(self, depth, azimuth):
         sin_azimuth = sin(azimuth)
         cos_azimuth = cos(azimuth)
-        p=geometry_msgs.msg.Point()
+
+        p = geometry_msgs.msg.Point()
         p.x = depth * cos_azimuth
         p.y = depth * sin_azimuth
-        return p
-    
-    #From cartesian to spherical coordinates
-    def cartesian2Spherical(self, x,  y):
-        depth = sqrt((x * x) + (y * y))
 
+        return p
+
+
+    #From cartesian to spherical coordinates
+    def cartesian2Spherical(self, x, y):
+        depth = sqrt((x * x) + (y * y))
         azimuth = atan2(y, x)
 
-        if (azimuth < 0): azimuth += 2*pi
-        if (azimuth >= 2*pi): azimuth -= 2*pi
+        if azimuth < 0:
+            azimuth += 2*pi
+
+        if azimuth >= 2*pi:
+            azimuth -= 2*pi
 
         return depth, azimuth
-    
+
+
     def run(self):
         #Control loop
         rate = rospy.Rate(self.rate)
-        count=3
+        count = 0
+
         while not rospy.is_shutdown():
             self.controlActionCalculation()
-            if count==0:
+
+            if count == 0:
                 self.localGoalCalculation()
-                count=3
-            else: count-=1
+                count = 3
+            else:
+                count -= 1
+
             rate.sleep()
+
 
 def main():
     try:
         print("Init blue_planner_node")
         node = BlueTrajectoryPlanner()
         node.run()
-        
+
     except rospy.ROSInterruptException:
         return
     except KeyboardInterrupt:
@@ -336,6 +695,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
-
-    

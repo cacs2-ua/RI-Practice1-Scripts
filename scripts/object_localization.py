@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # This node (implemented in Python) computes the position (xyz) of the objects detected by an RGBD camera.
 # The centroid of each individual detected object is obtained using the RGB to HSV color filtering.

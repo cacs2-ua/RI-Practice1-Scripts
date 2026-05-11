@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # ROS node to move the UR5 arm robot to the goal position using MoveIt and
 # open/close the gripper. It comunicates with the other nodes through the topic
