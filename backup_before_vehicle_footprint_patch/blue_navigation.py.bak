@@ -47,14 +47,14 @@ class BlueTrajectoryPlanner(object):
 
         #Parameter initialization
         self.delta_angle = rospy.get_param("~delta_angle", 6.0*pi/180.0)
-        self.delta_sample = rospy.get_param("~delta_sample", 0.10)
-        self.max_sample = rospy.get_param("~max_sample", 4.00)
+        self.delta_sample = rospy.get_param("~delta_sample", 0.20)
+        self.max_sample = rospy.get_param("~max_sample", 3.00)
         self.reached_distance = rospy.get_param("~reached_distance", 1.00)
         self.slow_down_distance = rospy.get_param("~slow_down_distance", 2.00)
         self.rate = rospy.get_param("~rate", 5)
 
         #TODO Define other parameters needed for the planner.
-        self.collision_margin = rospy.get_param("~collision_margin", 0.25)
+        self.collision_margin = rospy.get_param("~collision_margin", 0.32)
         self.trajectory_distance_weight = rospy.get_param("~trajectory_distance_weight", 1.00)
         self.trajectory_heading_weight = rospy.get_param("~trajectory_heading_weight", 0.70)
         self.trajectory_steering_weight = rospy.get_param("~trajectory_steering_weight", 0.10)
@@ -73,39 +73,6 @@ class BlueTrajectoryPlanner(object):
         self.front_block_distance = rospy.get_param("~front_block_distance", 2.60)
         self.front_block_half_width = rospy.get_param("~front_block_half_width", 1.00)
         self.side_clearance_distance = rospy.get_param("~side_clearance_distance", 3.20)
-        # Explicit side-bypass parameters.
-        # When an obstacle is detected in front of BLUE, the planner temporarily
-        # targets a lateral point instead of trying to squeeze around the obstacle
-        # corner. This is required for Ackermann vehicles because the wheel/body
-        # footprint is wider than the trajectory centerline.
-        self.enable_explicit_bypass_target = rospy.get_param("~enable_explicit_bypass_target", True)
-        self.bypass_trigger_distance = rospy.get_param("~bypass_trigger_distance", 6.00)
-        self.bypass_front_half_width = rospy.get_param("~bypass_front_half_width", 1.45)
-        self.bypass_forward_target_distance = rospy.get_param("~bypass_forward_target_distance", 3.20)
-        self.bypass_lateral_target_offset = rospy.get_param("~bypass_lateral_target_offset", 3.00)
-        self.preferred_bypass_side = rospy.get_param("~preferred_bypass_side", "left")
-
-        # Obstacle point inflation.
-        # LiDAR points may miss the exact box corner. Inflating obstacle points makes
-        # the planner treat obstacle corners as dangerous earlier.
-        self.obstacle_point_inflation_radius = rospy.get_param("~obstacle_point_inflation_radius", 0.55)
-        # Vehicle footprint parameters.
-        # These values approximate the physical space occupied by BLUE around the
-        # local trajectory point. This avoids the previous failure where the
-        # trajectory center avoided the obstacle but a wheel/body corner collided.
-        self.vehicle_half_width = rospy.get_param("~vehicle_half_width", 0.65)
-        self.vehicle_front_length = rospy.get_param("~vehicle_front_length", 1.35)
-        self.vehicle_rear_length = rospy.get_param("~vehicle_rear_length", 0.45)
-
-        # Clearance-aware trajectory scoring.
-        # Higher values make the robot prefer trajectories that pass farther away
-        # from obstacle corners.
-        self.minimum_clearance_for_scoring = rospy.get_param("~minimum_clearance_for_scoring", 1.00)
-        self.trajectory_clearance_weight = rospy.get_param("~trajectory_clearance_weight", 2.20)
-
-        # Slow down when an obstacle is close in front of the robot.
-        self.obstacle_slowdown_distance = rospy.get_param("~obstacle_slowdown_distance", 3.40)
-        self.obstacle_slowdown_half_width = rospy.get_param("~obstacle_slowdown_half_width", 1.20)
 
         # -------------------------------------------------------------------------
         # BLOCK 3: Runtime variables.
@@ -308,37 +275,10 @@ class BlueTrajectoryPlanner(object):
         #Save as geometry_msg.Point
         self.obstacles = []
 
-        # -------------------------------------------------------------------------
-        # BLOCK: Inflated obstacle cloud.
-        # The raw LiDAR cloud may not contain the exact obstacle corner that later
-        # hits the wheel/body. Each detected obstacle point is expanded around x/y
-        # so that the planner avoids the complete obstacle volume more conservatively.
-        # -------------------------------------------------------------------------
-
-        inflation_radius = self.obstacle_point_inflation_radius
-
-        inflation_offsets = [
-            (0.0, 0.0),
-            (inflation_radius, 0.0),
-            (-inflation_radius, 0.0),
-            (0.0, inflation_radius),
-            (0.0, -inflation_radius),
-            (inflation_radius, inflation_radius),
-            (inflation_radius, -inflation_radius),
-            (-inflation_radius, inflation_radius),
-            (-inflation_radius, -inflation_radius),
-        ]
-
         for point in pc_obstacles:
             x, y, z = point
-
-            for offset_x, offset_y in inflation_offsets:
-                new_point = geometry_msgs.msg.Point(
-                    x + offset_x,
-                    y + offset_y,
-                    z
-                )
-                self.obstacles.append(new_point)
+            new_point = geometry_msgs.msg.Point(x, y, z)
+            self.obstacles.append(new_point)
 
 
     def limits_callback(self, limits: sensor_msgs.msg.PointCloud2):
@@ -396,10 +336,6 @@ class BlueTrajectoryPlanner(object):
             if self.local_target is None:
                 self.local_target = self.global2local(self.goal)
 
-        # Slow down when the frontal corridor is occupied. This gives the
-        # Ackermann vehicle enough time to turn before reaching obstacle corners.
-        speed = self.limit_speed_when_obstacle_is_close(speed)
-
         #Variable initialization
         min_error = float("inf")
         selected_command_found = False
@@ -423,7 +359,6 @@ class BlueTrajectoryPlanner(object):
                 flag_collision_risk = False
                 final_local_point = geometry_msgs.msg.Point()
                 final_heading = 0.0
-                closest_trajectory_clearance = float("inf")
 
                 #TODO Calculate turn radius and velocity using the robot kinematics.
 
@@ -459,15 +394,14 @@ class BlueTrajectoryPlanner(object):
                     if abs(steer) < 1e-5:
                         local_point.x = dir * sample
                         local_point.y = 0.0
-                        local_heading = 0.0
+                        final_heading = 0.0
                     else:
                         yaw = angular_velocity * sample
                         local_point.x = turn_radius * sin(yaw)
                         local_point.y = turn_radius * (1.0 - cos(yaw))
-                        local_heading = yaw
+                        final_heading = yaw
 
                     final_local_point = local_point
-                    final_heading = local_heading
 
                     #TODO Detect collisions risk.
 
@@ -478,16 +412,7 @@ class BlueTrajectoryPlanner(object):
                     # -------------------------------------------------------------------------
 
                     for obstacle in self.obstacles:
-                        footprint_clearance = self.vehicle_footprint_clearance(
-                            local_point,
-                            local_heading,
-                            obstacle
-                        )
-
-                        if footprint_clearance < closest_trajectory_clearance:
-                            closest_trajectory_clearance = footprint_clearance
-
-                        if footprint_clearance < self.collision_margin:
+                        if self.distance(local_point, obstacle) < self.collision_margin:
                             flag_collision_risk = True
                             break
 
@@ -525,16 +450,10 @@ class BlueTrajectoryPlanner(object):
                     if dir < 0.0:
                         reverse_penalty = self.reverse_motion_penalty
 
-                    clearance_penalty = max(
-                        0.0,
-                        self.minimum_clearance_for_scoring - closest_trajectory_clearance
-                    )
-
                     error = (
                         self.trajectory_distance_weight * distance_error +
                         self.trajectory_heading_weight * heading_error +
                         self.trajectory_steering_weight * steering_error +
-                        self.trajectory_clearance_weight * clearance_penalty +
                         reverse_penalty
                     )
 
@@ -573,17 +492,6 @@ class BlueTrajectoryPlanner(object):
             return
 
         if not self.navigation_enabled:
-            return
-
-        # If an obstacle is directly in front of BLUE, force a lateral bypass
-        # target. This prevents the robot from trying to pass too close to the
-        # obstacle corner.
-        bypass_target = self.compute_explicit_bypass_target()
-
-        if bypass_target is not None:
-            self.local_target = bypass_target
-            self.local_path = [bypass_target]
-            self.publish_local_path_markers()
             return
 
         # If the obstacle detector has not published the free-zone ring yet, use
@@ -679,7 +587,27 @@ class BlueTrajectoryPlanner(object):
             self.local_target = self.global2local(self.goal)
 
         #Publish the target visualization.
-        self.publish_local_path_markers()
+        marker_msg = MarkerArray()
+
+        for id, point in enumerate(self.local_path):
+            marker = Marker()
+            marker.header.frame_id = "blue/velodyne"
+            marker.header.stamp = rospy.Time()
+            marker.id = id
+            marker.type = Marker.SPHERE
+            marker.action = Marker.ADD
+            marker.pose.position = point
+            marker.pose.orientation.w = 1.0
+            marker.scale.x = 0.5
+            marker.scale.y = 0.5
+            marker.scale.z = 0.5
+            marker.color.a = 1.0
+            marker.color.r = 1.0
+            marker.color.g = 0.0
+            marker.color.b = 1.0
+            marker_msg.markers.append(marker)
+
+        self.marker_publisher.publish(marker_msg)
 
 
     def distance(self, p1: geometry_msgs.msg.Point, p2: geometry_msgs.msg.Point):
@@ -749,175 +677,6 @@ class BlueTrajectoryPlanner(object):
 
         return depth, azimuth
 
-
-
-    def vehicle_footprint_clearance(self, vehicle_pose, vehicle_heading, obstacle_point):
-        # -------------------------------------------------------------------------
-        # BLOCK: Vehicle footprint clearance.
-        # The previous implementation checked only the distance from the trajectory
-        # center point to each obstacle. That allowed the centerline to pass while
-        # the wheel/body corner collided with obstacle corners.
-        #
-        # This function approximates BLUE as a rectangle around each sampled pose.
-        # It returns the distance from the obstacle point to the rectangle border.
-        # If the obstacle is inside the rectangle, the clearance is zero.
-        # -------------------------------------------------------------------------
-
-        dx = obstacle_point.x - vehicle_pose.x
-        dy = obstacle_point.y - vehicle_pose.y
-
-        cos_heading = cos(-vehicle_heading)
-        sin_heading = sin(-vehicle_heading)
-
-        obstacle_x_in_vehicle_frame = dx * cos_heading - dy * sin_heading
-        obstacle_y_in_vehicle_frame = dx * sin_heading + dy * cos_heading
-
-        min_x = -self.vehicle_rear_length
-        max_x = self.vehicle_front_length
-        min_y = -self.vehicle_half_width
-        max_y = self.vehicle_half_width
-
-        closest_x = max(min(obstacle_x_in_vehicle_frame, max_x), min_x)
-        closest_y = max(min(obstacle_y_in_vehicle_frame, max_y), min_y)
-
-        distance_x = obstacle_x_in_vehicle_frame - closest_x
-        distance_y = obstacle_y_in_vehicle_frame - closest_y
-
-        return sqrt(distance_x ** 2 + distance_y ** 2)
-
-
-    def closest_front_obstacle_distance(self):
-        # -------------------------------------------------------------------------
-        # BLOCK: Closest frontal obstacle distance.
-        # This is used only to reduce speed before a tight avoidance maneuver.
-        # -------------------------------------------------------------------------
-
-        closest_distance = float("inf")
-
-        for obstacle in self.obstacles:
-            if (
-                0.0 <= obstacle.x <= self.obstacle_slowdown_distance and
-                abs(obstacle.y) <= self.obstacle_slowdown_half_width
-            ):
-                closest_distance = min(closest_distance, obstacle.x)
-
-        return closest_distance
-
-
-    def limit_speed_when_obstacle_is_close(self, requested_speed):
-        # -------------------------------------------------------------------------
-        # BLOCK: Obstacle-aware speed limiter.
-        # Ackermann vehicles need space to turn. When an obstacle is close in front,
-        # keeping high speed makes the robot clip the obstacle corner.
-        # -------------------------------------------------------------------------
-
-        closest_distance = self.closest_front_obstacle_distance()
-
-        if closest_distance < 1.20:
-            return MIN_SPEED
-
-        if closest_distance < self.obstacle_slowdown_distance:
-            return min(requested_speed, 0.75)
-
-        return requested_speed
-
-
-    def compute_explicit_bypass_target(self):
-        # -------------------------------------------------------------------------
-        # BLOCK: Explicit lateral bypass target.
-        # If a frontal obstacle exists, generate a temporary local target clearly
-        # to the left or right of the obstacle. This forces an early wide turn.
-        # -------------------------------------------------------------------------
-
-        if not self.enable_explicit_bypass_target:
-            return None
-
-        frontal_obstacles = []
-
-        for obstacle in self.obstacles:
-            if (
-                0.35 <= obstacle.x <= self.bypass_trigger_distance and
-                abs(obstacle.y) <= self.bypass_front_half_width
-            ):
-                frontal_obstacles.append(obstacle)
-
-        if len(frontal_obstacles) == 0:
-            return None
-
-        closest_obstacle_x = min(obstacle.x for obstacle in frontal_obstacles)
-
-        left_score = 0.0
-        right_score = 0.0
-
-        for obstacle in self.obstacles:
-            if 0.0 <= obstacle.x <= self.bypass_trigger_distance:
-                obstacle_distance = max(0.30, sqrt(obstacle.x ** 2 + obstacle.y ** 2))
-                score = 1.0 / obstacle_distance
-
-                if obstacle.y >= 0.0:
-                    left_score += score
-                else:
-                    right_score += score
-
-        if self.preferred_bypass_side == "left":
-            bypass_side = 1.0
-        elif self.preferred_bypass_side == "right":
-            bypass_side = -1.0
-        else:
-            # Auto mode: choose the side with fewer obstacle points.
-            bypass_side = -1.0 if left_score > right_score else 1.0
-
-        bypass_target = geometry_msgs.msg.Point()
-
-        # Do not aim at the obstacle. Aim before/alongside it, with a large lateral
-        # offset. This produces a wide avoidance arc.
-        bypass_target.x = min(
-            self.bypass_forward_target_distance,
-            max(1.60, closest_obstacle_x - 0.80)
-        )
-
-        bypass_target.y = bypass_side * self.bypass_lateral_target_offset
-        bypass_target.z = 0.0
-
-        rospy.logwarn_throttle(
-            1.0,
-            "Explicit bypass target active: x=%.2f, y=%.2f, closest_obstacle_x=%.2f, side=%s",
-            bypass_target.x,
-            bypass_target.y,
-            closest_obstacle_x,
-            "LEFT" if bypass_side > 0.0 else "RIGHT"
-        )
-
-        return bypass_target
-
-
-    def publish_local_path_markers(self):
-        # -------------------------------------------------------------------------
-        # BLOCK: Local path marker publisher.
-        # Visualizes the selected local target / bypass target in RViz.
-        # -------------------------------------------------------------------------
-
-        marker_msg = MarkerArray()
-
-        for id, point in enumerate(self.local_path):
-            marker = Marker()
-            marker.header.frame_id = "blue/velodyne"
-            marker.header.stamp = rospy.Time()
-            marker.id = id
-            marker.type = Marker.SPHERE
-            marker.action = Marker.ADD
-            marker.pose.position = point
-            marker.pose.orientation.w = 1.0
-            marker.scale.x = 0.6
-            marker.scale.y = 0.6
-            marker.scale.z = 0.6
-            marker.color.a = 1.0
-            marker.color.r = 1.0
-            marker.color.g = 0.0
-            marker.color.b = 1.0
-            marker_msg.markers.append(marker)
-
-        self.marker_publisher.publish(marker_msg)
 
 
     def compute_emergency_avoidance_command(self):
